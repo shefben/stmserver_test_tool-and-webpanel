@@ -5,6 +5,11 @@
 
 require_once __DIR__ . '/config.php';
 require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/includes/db.php';
+require_once __DIR__ . '/includes/functions.php';
+
+// Get site title
+$siteTitle = getSiteTitle();
 
 // Redirect if already logged in
 if (isLoggedIn()) {
@@ -31,7 +36,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - <?= PANEL_NAME ?></title>
+    <title>Login - <?= htmlspecialchars($siteTitle) ?></title>
     <style>
         /* OldSteam Theme Colors */
         :root {
@@ -210,7 +215,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <body>
     <div class="login-container">
         <div class="logo">
-            <h1><?= PANEL_NAME ?></h1>
+            <h1><?= htmlspecialchars($siteTitle) ?></h1>
             <div class="steam-line"></div>
             <p>Sign in to access the testing dashboard</p>
         </div>

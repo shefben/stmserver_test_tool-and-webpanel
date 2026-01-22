@@ -116,6 +116,11 @@ try {
                 <span class="action-text">Version Notifications</span>
                 <span class="action-desc">Known issues and notes for client versions</span>
             </a>
+            <a href="?page=admin_settings" class="admin-action-btn">
+                <span class="action-icon">&#9881;</span>
+                <span class="action-text">Site Settings</span>
+                <span class="action-desc">Configure site title, privacy, and email settings</span>
+            </a>
             <a href="?page=submit" class="admin-action-btn">
                 <span class="action-icon">&#128228;</span>
                 <span class="action-text">Submit Report</span>

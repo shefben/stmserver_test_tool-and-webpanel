@@ -250,7 +250,7 @@ $stats = $db->getInviteCodeStats();
         <li>Create invite codes to allow new users to register accounts</li>
         <li>Each code can only be used <strong>once</strong></li>
         <li>Codes automatically expire after <strong>3 days</strong></li>
-        <li>Share the registration link: <code><?= rtrim(SITE_URL, '/') ?>/register.php</code></li>
+        <li>Share the registration link: <code><?= rtrim((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']), '/') ?>/register.php</code></li>
         <li>Users will need a valid invite code to create an account</li>
     </ul>
 </div>

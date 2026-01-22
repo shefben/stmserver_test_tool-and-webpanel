@@ -1005,13 +1005,8 @@ try {
         mkdir(__DIR__ . '/data', 0755, true);
     }
 
-    // Create cache directory
-    $cacheDir = __DIR__ . '/cache';
-    if (!is_dir($cacheDir)) {
-        mkdir($cacheDir, 0755, true);
-    }
-
     // Build GitHub revision cache during installation (if configured)
+    // Use data directory for cache (same as runtime code in functions.php)
     $githubCacheResult = null;
     if (!empty($githubOwner) && !empty($githubRepo) && !empty($githubToken)) {
         if ($isCli) {
@@ -1021,7 +1016,7 @@ try {
         try {
             require_once __DIR__ . '/api/githubrevisiongrabber.php';
 
-            $ghCache = new GitHubRepoHistoryCache($githubToken, $cacheDir);
+            $ghCache = new GitHubRepoHistoryCache($githubToken, __DIR__ . '/data');
             $commitCount = $ghCache->buildInitialCache($githubOwner, $githubRepo, [
                 'branch' => 'main',
                 'max_commits' => 500,

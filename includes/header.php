@@ -13,6 +13,7 @@ requireLogin();
 
 $currentPage = getCurrentPage();
 $user = getCurrentUser();
+$siteTitle = getSiteTitle();
 
 // Get unread notification count
 $db = Database::getInstance();
@@ -40,7 +41,7 @@ if (!isset($user['role'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= PANEL_NAME ?></title>
+    <title><?= e($siteTitle) ?></title>
     <link rel="stylesheet" href="assets/css/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -48,7 +49,7 @@ if (!isset($user['role'])) {
     <header class="header">
         <div class="container">
             <div class="header-inner">
-                <a href="?page=dashboard" class="logo"><?= PANEL_NAME ?></a>
+                <a href="?page=dashboard" class="logo"><?= e($siteTitle) ?></a>
 
                 <nav class="nav">
                     <a href="?page=dashboard" class="<?= $currentPage === 'dashboard' ? 'active' : '' ?>">Dashboard</a>

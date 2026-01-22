@@ -3218,6 +3218,218 @@ class Database {
 
         return $count;
     }
+
+    // ========================================
+    // Site Settings Methods
+    // ========================================
+
+    /**
+     * Check if site_settings table exists
+     */
+    public function hasSettingsTable() {
+        try {
+            $stmt = $this->pdo->query("SELECT 1 FROM site_settings LIMIT 1");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Create the site_settings table if it doesn't exist
+     */
+    public function createSettingsTable() {
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS site_settings (
+                setting_key VARCHAR(100) NOT NULL PRIMARY KEY,
+                setting_value TEXT,
+                setting_type ENUM('string', 'int', 'bool', 'json') NOT NULL DEFAULT 'string',
+                description VARCHAR(255) DEFAULT NULL,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB
+        ");
+
+        // Insert default settings if they don't exist
+        $defaults = [
+            ['site_title', 'Steam Emulator Test Panel', 'string', 'Site title displayed in header and browser tab'],
+            ['site_private', '0', 'bool', 'Require login for all pages (guests redirected to login)'],
+            ['smtp_enabled', '0', 'bool', 'Enable SMTP email sending'],
+            ['smtp_host', '', 'string', 'SMTP server hostname'],
+            ['smtp_port', '587', 'int', 'SMTP server port'],
+            ['smtp_username', '', 'string', 'SMTP authentication username'],
+            ['smtp_password', '', 'string', 'SMTP authentication password'],
+            ['smtp_encryption', 'tls', 'string', 'SMTP encryption (tls, ssl, or none)'],
+            ['smtp_from_email', '', 'string', 'From email address for outgoing emails'],
+            ['smtp_from_name', '', 'string', 'From name for outgoing emails'],
+        ];
+
+        $stmt = $this->pdo->prepare("
+            INSERT IGNORE INTO site_settings (setting_key, setting_value, setting_type, description)
+            VALUES (?, ?, ?, ?)
+        ");
+
+        foreach ($defaults as $setting) {
+            $stmt->execute($setting);
+        }
+    }
+
+    /**
+     * Get a single setting value
+     */
+    public function getSetting($key, $default = null) {
+        if (!$this->hasSettingsTable()) {
+            return $default;
+        }
+
+        $stmt = $this->pdo->prepare("SELECT setting_value, setting_type FROM site_settings WHERE setting_key = ?");
+        $stmt->execute([$key]);
+        $result = $stmt->fetch();
+
+        if (!$result) {
+            return $default;
+        }
+
+        // Cast value based on type
+        switch ($result['setting_type']) {
+            case 'int':
+                return (int)$result['setting_value'];
+            case 'bool':
+                return (bool)$result['setting_value'];
+            case 'json':
+                return json_decode($result['setting_value'], true);
+            default:
+                return $result['setting_value'];
+        }
+    }
+
+    /**
+     * Get all settings as an associative array
+     */
+    public function getAllSettings() {
+        if (!$this->hasSettingsTable()) {
+            return [];
+        }
+
+        $stmt = $this->pdo->query("SELECT setting_key, setting_value, setting_type, description FROM site_settings ORDER BY setting_key");
+        $results = $stmt->fetchAll();
+
+        $settings = [];
+        foreach ($results as $row) {
+            switch ($row['setting_type']) {
+                case 'int':
+                    $value = (int)$row['setting_value'];
+                    break;
+                case 'bool':
+                    $value = (bool)$row['setting_value'];
+                    break;
+                case 'json':
+                    $value = json_decode($row['setting_value'], true);
+                    break;
+                default:
+                    $value = $row['setting_value'];
+            }
+            $settings[$row['setting_key']] = [
+                'value' => $value,
+                'type' => $row['setting_type'],
+                'description' => $row['description']
+            ];
+        }
+
+        return $settings;
+    }
+
+    /**
+     * Set a setting value
+     */
+    public function setSetting($key, $value, $type = null, $description = null) {
+        if (!$this->hasSettingsTable()) {
+            $this->createSettingsTable();
+        }
+
+        // Handle value conversion for storage
+        if ($type === 'bool') {
+            $value = $value ? '1' : '0';
+        } elseif ($type === 'json' && is_array($value)) {
+            $value = json_encode($value);
+        }
+
+        if ($type === null) {
+            // Update only the value
+            $stmt = $this->pdo->prepare("
+                INSERT INTO site_settings (setting_key, setting_value)
+                VALUES (?, ?)
+                ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
+            ");
+            $stmt->execute([$key, $value]);
+        } else {
+            // Update value and type
+            $stmt = $this->pdo->prepare("
+                INSERT INTO site_settings (setting_key, setting_value, setting_type, description)
+                VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                    setting_value = VALUES(setting_value),
+                    setting_type = VALUES(setting_type),
+                    description = COALESCE(VALUES(description), description)
+            ");
+            $stmt->execute([$key, $value, $type, $description]);
+        }
+
+        return true;
+    }
+
+    /**
+     * Update multiple settings at once
+     */
+    public function updateSettings($settings) {
+        if (!$this->hasSettingsTable()) {
+            $this->createSettingsTable();
+        }
+
+        foreach ($settings as $key => $value) {
+            // Get the current type for this setting
+            $stmt = $this->pdo->prepare("SELECT setting_type FROM site_settings WHERE setting_key = ?");
+            $stmt->execute([$key]);
+            $current = $stmt->fetch();
+
+            $type = $current ? $current['setting_type'] : 'string';
+
+            // Convert value for storage
+            if ($type === 'bool') {
+                $value = $value ? '1' : '0';
+            } elseif ($type === 'json' && is_array($value)) {
+                $value = json_encode($value);
+            }
+
+            $stmt = $this->pdo->prepare("
+                UPDATE site_settings SET setting_value = ? WHERE setting_key = ?
+            ");
+            $stmt->execute([$value, $key]);
+        }
+
+        return true;
+    }
+
+    /**
+     * Delete a setting
+     */
+    public function deleteSetting($key) {
+        $stmt = $this->pdo->prepare("DELETE FROM site_settings WHERE setting_key = ?");
+        return $stmt->execute([$key]);
+    }
+
+    /**
+     * Check if the site is in private mode
+     */
+    public function isSitePrivate() {
+        return (bool)$this->getSetting('site_private', false);
+    }
+
+    /**
+     * Get the site title
+     */
+    public function getSiteTitle() {
+        return $this->getSetting('site_title', PANEL_NAME);
+    }
 }
 
 // Helper function

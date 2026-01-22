@@ -38,6 +38,7 @@ $validPages = [
     'admin_versions',
     'admin_version_notifications',
     'admin_invites',
+    'admin_settings',
     'edit_report',
     'profile',
     'notifications',

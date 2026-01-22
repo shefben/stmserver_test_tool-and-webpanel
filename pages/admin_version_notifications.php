@@ -21,7 +21,7 @@ $db->ensureVersionNotificationsTable();
 $commits = [];
 if (defined('GITHUB_TOKEN') && GITHUB_TOKEN !== '' && defined('GITHUB_OWNER') && GITHUB_OWNER !== '') {
     try {
-        $cacheDir = __DIR__ . '/../cache';
+        $cacheDir = __DIR__ . '/../data';
         if (!is_dir($cacheDir)) {
             @mkdir($cacheDir, 0755, true);
         }

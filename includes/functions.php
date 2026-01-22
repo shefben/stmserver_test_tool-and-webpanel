@@ -242,6 +242,42 @@ function getCurrentPage() {
     return $_GET['page'] ?? 'dashboard';
 }
 
+// Get site title from settings (with fallback to PANEL_NAME constant)
+function getSiteTitle() {
+    static $siteTitle = null;
+    if ($siteTitle === null) {
+        try {
+            $db = Database::getInstance();
+            $siteTitle = $db->getSiteTitle();
+        } catch (Exception $e) {
+            $siteTitle = PANEL_NAME;
+        }
+    }
+    return $siteTitle;
+}
+
+// Check if site is in private mode
+function isSitePrivate() {
+    static $isPrivate = null;
+    if ($isPrivate === null) {
+        try {
+            $db = Database::getInstance();
+            $isPrivate = $db->isSitePrivate();
+        } catch (Exception $e) {
+            $isPrivate = false;
+        }
+    }
+    return $isPrivate;
+}
+
+// Enforce private mode - redirects to login if site is private and user not logged in
+function enforcePrivateMode() {
+    if (isSitePrivate() && !isLoggedIn()) {
+        header('Location: login.php');
+        exit;
+    }
+}
+
 // Get base URL for the application
 function getBaseUrl() {
     $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
