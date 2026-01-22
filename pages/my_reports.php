@@ -92,7 +92,7 @@ foreach ($reports as $report) {
 <div class="card">
     <?php if (empty($reports)): ?>
         <p style="color: var(--text-muted); text-align: center; padding: 40px;">
-            You haven't submitted any reports yet. <a href="?page=submit">Submit your first report</a>.
+            You haven't submitted any reports yet. <a href="?page=submit">Submit your first report</a> or <a href="?page=create_report">Create a new report</a>.
         </p>
     <?php else: ?>
         <div class="table-container">

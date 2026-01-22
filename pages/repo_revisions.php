@@ -60,7 +60,7 @@ foreach ($commitStats as $commit) {
 <?php if (empty($commitStats)): ?>
     <div class="card">
         <p style="color: var(--text-muted); text-align: center; padding: 40px;">
-            No commit data available yet. <a href="?page=submit">Submit a report</a> with a commit hash to see revision statistics.
+            No commit data available yet. <a href="?page=submit">Submit a report</a> or <a href="?page=create_report">Create a new report</a> with a commit hash to see revision statistics.
         </p>
     </div>
 <?php else: ?>
@@ -306,7 +306,7 @@ function showCommitPopupDialog(title, content) {
     overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; display: flex; align-items: center; justify-content: center;';
 
     var popup = document.createElement('div');
-    popup.style.cssText = 'background: var(--bg-card); padding: 20px; border-radius: 8px; max-width: 600px; max-height: 80vh; overflow-y: auto; color: var(--text); box-shadow: 0 10px 40px rgba(0,0,0,0.5);';
+    popup.style.cssText = 'background: rgba(76, 88, 68, 0.8); padding: 20px; border-radius: 8px; max-width: 600px; max-height: 80vh; overflow-y: auto; color: var(--text); box-shadow: 0 10px 40px rgba(0,0,0,0.5);';
 
     popup.innerHTML = '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">' +
         '<h3 style="margin: 0; color: var(--primary);">' + escapeHtmlPopup(title) + '</h3>' +

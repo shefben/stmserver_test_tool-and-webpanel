@@ -26,7 +26,7 @@ define('DB_PATH', __DIR__ . '/data/test_panel.db');
 define('AUTH_USERS', []);
 
 // Panel settings
-define('PANEL_NAME', 'bens Emulator Test Panel');
+define('PANEL_NAME', 'Steam Emulator Test Panel');
 define('ITEMS_PER_PAGE', 25);
 
 // GitHub Integration - for tracking commit revisions

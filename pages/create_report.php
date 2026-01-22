@@ -171,9 +171,26 @@ if (isGitHubConfigured()) {
         <div class="form-row">
             <div class="form-group">
                 <label>Client Version *</label>
-                <input type="text" name="client_version" value="<?= e($_POST['client_version'] ?? '') ?>" required
-                       placeholder="e.g., 1.0.0 or Steam Client v1234">
-                <small style="color: var(--text-muted);">The version of the client being tested</small>
+                <select name="client_version" id="client_version" required>
+                    <option value="">-- Select a client version --</option>
+                    <?php if (!empty($clientVersions)): ?>
+                        <?php foreach ($clientVersions as $version): ?>
+                            <?php
+                            $versionId = $version['version_id'] ?? '';
+                            $displayName = trim($version['display_name'] ?? '');
+                            $label = $displayName !== '' && $displayName !== $versionId
+                                ? $displayName . ' (' . $versionId . ')'
+                                : $versionId;
+                            ?>
+                            <option value="<?= e($versionId) ?>" <?= ($_POST['client_version'] ?? '') === $versionId ? 'selected' : '' ?>>
+                                <?= e($label) ?>
+                            </option>
+                        <?php endforeach; ?>
+                    <?php else: ?>
+                        <option value="" disabled>No client versions available</option>
+                    <?php endif; ?>
+                </select>
+                <small style="color: var(--text-muted);">Select the client version being tested</small>
             </div>
             <div class="form-group">
                 <label>Test Type</label>
@@ -289,7 +306,7 @@ if (isGitHubConfigured()) {
         <?php if (!empty($clientVersions)): ?>
         <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border);">
             <p style="color: var(--text-muted); font-size: 13px;">
-                <strong>💡 Tip:</strong> Some client versions have pre-configured skip tests. When you enter a matching
+                <strong>💡 Tip:</strong> Some client versions have pre-configured skip tests. When you select a matching
                 client version above, tests that are known to be N/A for that version will be automatically marked.
             </p>
         </div>
@@ -297,16 +314,41 @@ if (isGitHubConfigured()) {
     </div>
     <?php endif; ?>
 
-    <!-- Log Files Note -->
+    <!-- Log Files Upload -->
     <div class="card" style="margin-bottom: 30px;">
         <h3 class="card-title" style="display: flex; align-items: center; gap: 10px;">
             <span style="font-size: 20px;">📄</span>
             Debug Log Files
         </h3>
-        <p style="color: var(--text-muted);">
-            After creating your report, you can attach up to 3 debug log files (.txt or .log) by editing the report.
-            Log files will be compressed automatically for efficient storage.
+        <p style="color: var(--text-muted); margin-bottom: 15px;">
+            Attach up to 3 debug log files (.log extension only). Maximum total size: 25MB.
         </p>
+
+        <div class="log-upload-container">
+            <div id="log-drop-zone" class="file-drop-zone" onclick="document.getElementById('log-file-input').click();">
+                <div class="drop-zone-content" id="drop-zone-content">
+                    <div style="font-size: 48px; margin-bottom: 10px; opacity: 0.6;">📁</div>
+                    <p class="drop-zone-text">Drag &amp; drop log files here</p>
+                    <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 15px;">or</p>
+                    <button type="button" class="btn btn-secondary" onclick="event.stopPropagation(); document.getElementById('log-file-input').click();">
+                        Browse Files
+                    </button>
+                    <p style="color: var(--text-muted); font-size: 11px; margin-top: 10px;">
+                        .log files only • Max 3 files • 25MB total
+                    </p>
+                </div>
+            </div>
+            <input type="file" id="log-file-input" name="log_files[]" multiple accept=".log"
+                   style="display: none;" onchange="handleLogFileSelect(this.files)">
+
+            <div id="log-files-list" style="margin-top: 15px; display: none;">
+                <h4 style="font-size: 12px; color: var(--primary); margin-bottom: 10px;">Selected Files:</h4>
+                <div id="log-files-items"></div>
+                <div style="margin-top: 10px; font-size: 11px; color: var(--text-muted);">
+                    Total size: <span id="log-files-total-size">0 KB</span> / 25 MB
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Test Results -->
@@ -329,10 +371,10 @@ if (isGitHubConfigured()) {
                     <table>
                         <thead>
                             <tr>
-                                <th style="width: 60px;">Key</th>
-                                <th>Test Name</th>
-                                <th style="width: 180px;">Status</th>
-                                <th>Notes</th>
+                                <th style="width: 60px; min-width: 60px;">Key</th>
+                                <th style="width: 30%; min-width: 200px;">Test Name</th>
+                                <th style="width: 150px; min-width: 150px;">Status</th>
+                                <th style="width: auto;">Notes</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -408,6 +450,68 @@ if (isGitHubConfigured()) {
     border-bottom: 1px solid var(--border);
 }
 
+/* Consistent table column widths */
+.category-section table {
+    table-layout: fixed;
+    width: 100%;
+}
+
+.category-section table th:nth-child(1),
+.category-section table td:nth-child(1) {
+    width: 60px;
+    min-width: 60px;
+}
+
+.category-section table th:nth-child(2),
+.category-section table td:nth-child(2) {
+    width: 30%;
+    min-width: 200px;
+}
+
+.category-section table th:nth-child(3),
+.category-section table td:nth-child(3) {
+    width: 150px;
+    min-width: 150px;
+}
+
+.category-section table th:nth-child(4),
+.category-section table td:nth-child(4) {
+    width: auto;
+}
+
+/* Log upload styles */
+.log-upload-container .file-drop-zone {
+    flex-direction: column;
+}
+
+.log-upload-container .drop-zone-content {
+    flex-direction: column;
+    display: flex;
+}
+
+.log-upload-container .btn-remove {
+    min-width: auto;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-top: solid 1px #a05555;
+    border-bottom: solid 1px #663333;
+    border-left: solid 1px #a05555;
+    border-right: solid 1px #663333;
+    background: #8b4444;
+    color: white;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+
+.log-upload-container .btn-remove:hover {
+    background: #9b5454;
+}
+
 /* Status select */
 .status-select {
     width: 100%;
@@ -473,7 +577,8 @@ if (isGitHubConfigured()) {
 // Update select color on change
 document.querySelectorAll('.status-select').forEach(select => {
     select.addEventListener('change', function() {
-        this.className = 'status-select ' + this.value.toLowerCase().replace(' ', '-');
+        // Replace all spaces with dashes for proper class name
+        this.className = 'status-select ' + this.value.toLowerCase().replace(/ /g, '-');
     });
 });
 
@@ -481,7 +586,8 @@ document.querySelectorAll('.status-select').forEach(select => {
 function setAllStatus(status) {
     document.querySelectorAll('.status-select').forEach(select => {
         select.value = status;
-        select.className = 'status-select ' + status.toLowerCase().replace(' ', '-');
+        // Replace all spaces with dashes for proper class name
+        select.className = 'status-select ' + status.toLowerCase().replace(/ /g, '-');
     });
 }
 
@@ -496,7 +602,7 @@ var templatesData = <?= json_encode(array_map(function($t) {
         'test_keys' => $t['test_keys'],
         'is_default' => $t['is_default']
     ];
-}, $templates)) ?>;
+}, $templates), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
 // Client version skip tests data
 var clientVersionsData = <?= json_encode(array_map(function($v) {
@@ -505,7 +611,7 @@ var clientVersionsData = <?= json_encode(array_map(function($v) {
         'version_id' => $v['version_id'],
         'skip_tests' => json_decode($v['skip_tests'] ?? '[]', true) ?: []
     ];
-}, $clientVersions)) ?>;
+}, $clientVersions), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
 // Handle template selection change
 function onTemplateChange() {
@@ -578,10 +684,10 @@ function applyTemplate() {
 
 // Apply version-based skip tests when client version changes
 function applyVersionSkipTests() {
-    var versionInput = document.querySelector('input[name="client_version"]');
-    if (!versionInput) return;
+    var versionSelect = document.querySelector('select[name="client_version"]');
+    if (!versionSelect) return;
 
-    var version = versionInput.value.trim();
+    var version = versionSelect.value.trim();
     if (!version) return;
 
     // Find matching client version
@@ -615,18 +721,177 @@ function applyVersionSkipTests() {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
-    // Add change listener to client version input for auto-skip
-    var versionInput = document.querySelector('input[name="client_version"]');
-    if (versionInput) {
-        versionInput.addEventListener('blur', applyVersionSkipTests);
+    // Add change listener to client version dropdown for auto-skip
+    var versionSelect = document.querySelector('select[name="client_version"]');
+    if (versionSelect) {
+        versionSelect.addEventListener('change', applyVersionSkipTests);
     }
 
     // Initialize template selector state
     onTemplateChange();
 });
 
+// ==================== Log File Upload Functions ====================
+
+var selectedLogFiles = [];
+var MAX_LOG_FILES = 3;
+var MAX_TOTAL_SIZE = 25 * 1024 * 1024; // 25MB
+
+// Initialize drag and drop
+document.addEventListener('DOMContentLoaded', function() {
+    var dropZone = document.getElementById('log-drop-zone');
+    if (dropZone) {
+        dropZone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.classList.add('dragover');
+        });
+
+        dropZone.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.classList.remove('dragover');
+        });
+
+        dropZone.addEventListener('drop', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.classList.remove('dragover');
+            handleLogFileSelect(e.dataTransfer.files);
+        });
+    }
+});
+
+// Handle file selection
+function handleLogFileSelect(files) {
+    var validFiles = [];
+    var errors = [];
+
+    for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+
+        // Check extension
+        if (!file.name.toLowerCase().endsWith('.log')) {
+            errors.push(file.name + ': Only .log files are allowed');
+            continue;
+        }
+
+        validFiles.push(file);
+    }
+
+    // Check max files limit
+    var totalFiles = selectedLogFiles.length + validFiles.length;
+    if (totalFiles > MAX_LOG_FILES) {
+        var canAdd = MAX_LOG_FILES - selectedLogFiles.length;
+        if (canAdd > 0) {
+            errors.push('Only ' + canAdd + ' more file(s) can be added. Maximum is ' + MAX_LOG_FILES + ' files.');
+            validFiles = validFiles.slice(0, canAdd);
+        } else {
+            errors.push('Maximum ' + MAX_LOG_FILES + ' files allowed. Remove some files first.');
+            validFiles = [];
+        }
+    }
+
+    // Check total size
+    var currentSize = selectedLogFiles.reduce(function(sum, f) { return sum + f.size; }, 0);
+    var newSize = validFiles.reduce(function(sum, f) { return sum + f.size; }, 0);
+
+    if (currentSize + newSize > MAX_TOTAL_SIZE) {
+        errors.push('Total file size exceeds 25MB limit');
+        // Try to add files that fit
+        var tempFiles = [];
+        var tempSize = currentSize;
+        for (var j = 0; j < validFiles.length; j++) {
+            if (tempSize + validFiles[j].size <= MAX_TOTAL_SIZE) {
+                tempFiles.push(validFiles[j]);
+                tempSize += validFiles[j].size;
+            }
+        }
+        validFiles = tempFiles;
+    }
+
+    // Add valid files
+    selectedLogFiles = selectedLogFiles.concat(validFiles);
+
+    // Update display
+    updateLogFilesDisplay();
+
+    // Show errors if any
+    if (errors.length > 0) {
+        alert('Some files could not be added:\n\n' + errors.join('\n'));
+    }
+}
+
+// Update the display of selected files
+function updateLogFilesDisplay() {
+    var listContainer = document.getElementById('log-files-list');
+    var itemsContainer = document.getElementById('log-files-items');
+    var totalSizeSpan = document.getElementById('log-files-total-size');
+    var dropZoneContent = document.getElementById('drop-zone-content');
+
+    if (selectedLogFiles.length === 0) {
+        listContainer.style.display = 'none';
+        dropZoneContent.style.display = 'flex';
+        return;
+    }
+
+    listContainer.style.display = 'block';
+
+    // Build file list HTML
+    var html = '';
+    var totalSize = 0;
+
+    for (var i = 0; i < selectedLogFiles.length; i++) {
+        var file = selectedLogFiles[i];
+        totalSize += file.size;
+        var sizeStr = formatFileSize(file.size);
+
+        html += '<div class="log-file-item" style="display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: var(--bg-dark); border: 1px solid var(--border); margin-bottom: 6px;">';
+        html += '<div style="display: flex; align-items: center; gap: 10px;">';
+        html += '<span style="font-size: 18px;">📄</span>';
+        html += '<div>';
+        html += '<div style="font-weight: 500; color: var(--text);">' + escapeHtml(file.name) + '</div>';
+        html += '<div style="font-size: 11px; color: var(--text-muted);">' + sizeStr + '</div>';
+        html += '</div>';
+        html += '</div>';
+        html += '<button type="button" class="btn-remove" onclick="removeLogFile(' + i + ')" title="Remove file">&times;</button>';
+        html += '</div>';
+    }
+
+    itemsContainer.innerHTML = html;
+    totalSizeSpan.textContent = formatFileSize(totalSize);
+
+    // Update hidden file input with actual files via DataTransfer
+    updateFileInput();
+}
+
+// Remove a file from the list
+function removeLogFile(index) {
+    selectedLogFiles.splice(index, 1);
+    updateLogFilesDisplay();
+}
+
+// Format file size
+function formatFileSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+// Update the file input with selected files
+function updateFileInput() {
+    var fileInput = document.getElementById('log-file-input');
+    var dataTransfer = new DataTransfer();
+
+    for (var i = 0; i < selectedLogFiles.length; i++) {
+        dataTransfer.items.add(selectedLogFiles[i]);
+    }
+
+    fileInput.files = dataTransfer.files;
+}
+
 // Revision data from PHP
-var revisionsData = <?= json_encode($revisionsData) ?>;
+var revisionsData = <?= json_encode($revisionsData, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
 
 // Show revision notes popup
 function showRevisionNotes() {
@@ -704,7 +969,7 @@ function showPopup(title, content) {
     overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 10000; display: flex; align-items: center; justify-content: center;';
 
     var popup = document.createElement('div');
-    popup.style.cssText = 'background: var(--bg-card); padding: 20px; border-radius: 8px; max-width: 600px; max-height: 80vh; overflow-y: auto; color: var(--text); box-shadow: 0 10px 40px rgba(0,0,0,0.5);';
+    popup.style.cssText = 'background: rgba(76, 88, 68, 0.8); padding: 20px; border-radius: 8px; max-width: 600px; max-height: 80vh; overflow-y: auto; color: var(--text); box-shadow: 0 10px 40px rgba(0,0,0,0.5);';
 
     popup.innerHTML = '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">' +
         '<h3 style="margin: 0; color: var(--primary);">' + escapeHtml(title) + '</h3>' +

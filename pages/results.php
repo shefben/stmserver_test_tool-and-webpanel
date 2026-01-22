@@ -52,9 +52,25 @@ if ($filterCommit) $titleParts[] = 'Commit ' . $filterCommit;
 $pageTitle = $titleParts ? implode(' - ', $titleParts) : 'All Test Results';
 
 // Get filter options
-$versions = $db->getUniqueValues('reports', 'client_version');
-$testers = $db->getUniqueValues('reports', 'tester');
-$commits = $db->getUniqueValues('reports', 'commit_hash');
+// Get client versions from the database client_versions table (not just from reports)
+$clientVersionsDb = $db->getClientVersions(true); // Get enabled versions only
+$versions = array_map(function($v) { return $v['version_id']; }, $clientVersionsDb);
+
+// Get testers - use all users from the database
+$allUsers = $db->getUsers();
+$testers = array_map(function($u) { return $u['username']; }, $allUsers);
+
+// Get commits from GitHub revision cache (if configured)
+$commits = [];
+if (isGitHubConfigured()) {
+    $revisionsData = getGitHubRevisions();
+    $commits = array_keys($revisionsData);
+}
+// Fall back to commits from reports if no GitHub data
+if (empty($commits)) {
+    $commits = $db->getUniqueValues('reports', 'commit_hash');
+}
+
 $testKeys = getSortedTestKeys();
 
 // Get pending retest requests map
@@ -91,7 +107,7 @@ $filterParams = http_build_query(array_filter([
 
         <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 120px;">
             <label>Status</label>
-            <select name="status">
+            <select name="status" class="<?= $filterStatus ? 'filter-active' : '' ?>">
                 <option value="">All Statuses</option>
                 <option value="Working" <?= $filterStatus === 'Working' ? 'selected' : '' ?>>Working</option>
                 <option value="Semi-working" <?= $filterStatus === 'Semi-working' ? 'selected' : '' ?>>Semi-working</option>
@@ -102,7 +118,7 @@ $filterParams = http_build_query(array_filter([
 
         <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 150px;">
             <label>Client Version</label>
-            <select name="version">
+            <select name="version" class="<?= $filterVersion ? 'filter-active' : '' ?>">
                 <option value="">All Versions</option>
                 <?php foreach ($versions as $v): ?>
                     <option value="<?= e($v) ?>" <?= $filterVersion === $v ? 'selected' : '' ?>>
@@ -114,7 +130,7 @@ $filterParams = http_build_query(array_filter([
 
         <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 150px;">
             <label>Test</label>
-            <select name="test_key">
+            <select name="test_key" class="<?= $filterTestKey ? 'filter-active' : '' ?>">
                 <option value="">All Tests</option>
                 <?php foreach ($testKeys as $key): ?>
                     <option value="<?= e($key) ?>" <?= $filterTestKey === $key ? 'selected' : '' ?>>
@@ -126,7 +142,7 @@ $filterParams = http_build_query(array_filter([
 
         <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 120px;">
             <label>Tester</label>
-            <select name="tester">
+            <select name="tester" class="<?= $filterTester ? 'filter-active' : '' ?>">
                 <option value="">All Testers</option>
                 <?php foreach ($testers as $t): ?>
                     <option value="<?= e($t) ?>" <?= $filterTester === $t ? 'selected' : '' ?>>
@@ -136,13 +152,23 @@ $filterParams = http_build_query(array_filter([
             </select>
         </div>
 
-        <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 120px;">
+        <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 180px;">
             <label>Commit</label>
-            <select name="commit">
+            <select name="commit" class="<?= $filterCommit ? 'filter-active' : '' ?>">
                 <option value="">All Commits</option>
-                <?php foreach ($commits as $c): ?>
+                <?php
+                // Show commits with date/time if we have revision data
+                $revData = isGitHubConfigured() ? getGitHubRevisions() : [];
+                foreach ($commits as $c):
+                    if (empty($c)) continue;
+                    $shortSha = substr($c, 0, 8);
+                    $label = $shortSha;
+                    if (isset($revData[$c]) && !empty($revData[$c]['ts'])) {
+                        $label = $shortSha . ' - ' . date('Y-m-d H:i', $revData[$c]['ts']);
+                    }
+                ?>
                     <option value="<?= e($c) ?>" <?= $filterCommit === $c ? 'selected' : '' ?>>
-                        <?= e($c) ?>
+                        <?= e($label) ?>
                     </option>
                 <?php endforeach; ?>
             </select>
@@ -333,6 +359,13 @@ function buildStatusLink($status, $baseParams) {
 </div>
 
 <style>
+/* Active filter highlight */
+.form-group select.filter-active {
+    border-color: #c4b550 !important;
+    background-color: rgba(196, 181, 80, 0.15);
+    box-shadow: 0 0 0 1px rgba(196, 181, 80, 0.3);
+}
+
 /* Retest indicator (visible to all users) */
 .retest-indicator {
     display: inline-block;

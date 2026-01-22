@@ -72,7 +72,7 @@ usort($versions, function($a, $b) {
 <?php if (empty($versions)): ?>
     <div class="card">
         <p style="color: var(--text-muted); text-align: center; padding: 40px;">
-            No report data available yet. <a href="?page=submit">Submit a report</a> to populate the matrix.
+            No report data available yet. <a href="?page=submit">Submit a report</a> or <a href="?page=create_report">Create a new report</a> to populate the matrix.
         </p>
     </div>
 <?php else: ?>

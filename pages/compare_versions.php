@@ -263,7 +263,7 @@ if ($version1 && $version2) {
 <?php else: ?>
     <div class="card">
         <p style="color: var(--text-muted); text-align: center; padding: 40px;">
-            No report data available yet. <a href="?page=submit">Submit a report</a> to enable comparisons.
+            No report data available yet. <a href="?page=submit">Submit a report</a> or <a href="?page=create_report">Create a new report</a> to enable comparisons.
         </p>
     </div>
 <?php endif; ?>

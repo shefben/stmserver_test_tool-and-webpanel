@@ -166,8 +166,8 @@ if (!empty($reportIds)) {
                     <th>ID</th>
                     <th>Client Version</th>
                     <th>SteamUI</th>
-                    <th>Steam PKG</th>
-                    <th>Commit</th>
+                    <th>Steam</th>
+                    <th>Commit Revision Hash</th>
                     <th>Tester</th>
                     <th>Type</th>
                     <th>Duration</th>
@@ -175,7 +175,7 @@ if (!empty($reportIds)) {
                     <th>Partial</th>
                     <th>Broken</th>
                     <th>Submitted</th>
-                    <th>Revision</th>
+                    <th>Report Revision</th>
                     <th>Last Modified</th>
                     <th>Actions</th>
                 </tr>
@@ -351,37 +351,42 @@ if (!empty($reportIds)) {
 </div>
 
 <style>
+/* Wider layout for reports page */
+.container {
+    max-width: 1800px;
+}
+
 /* Fixed column widths for reports table */
 .reports-table th:nth-child(1),
-.reports-table td:nth-child(1) { width: 70px; min-width: 70px; } /* ID */
+.reports-table td:nth-child(1) { width: 30px; min-width: 30px; text-align: center; } /* ID */
 .reports-table th:nth-child(2),
-.reports-table td:nth-child(2) { min-width: 200px; } /* Client Version */
+.reports-table td:nth-child(2) {  width: 170px; min-width: 170px; text-align: center; } /* Client Version */
 .reports-table th:nth-child(3),
-.reports-table td:nth-child(3) { width: 75px; min-width: 75px; max-width: 85px; } /* SteamUI - 7 chars max */
+.reports-table td:nth-child(3) { width: 70px; min-width: 70px; max-width: 110px; text-align: center; } /* SteamUI */
 .reports-table th:nth-child(4),
-.reports-table td:nth-child(4) { width: 60px; min-width: 60px; max-width: 70px; } /* Steam PKG - 5 chars max */
+.reports-table td:nth-child(4) { width: 30px; min-width: 30px; max-width: 120px; text-align: center; } /* Steam PKG */
 .reports-table th:nth-child(5),
-.reports-table td:nth-child(5) { width: 80px; min-width: 80px; } /* Commit */
+.reports-table td:nth-child(5) { width: 160px; min-width: 160px; text-align: center; } /* Commit */
 .reports-table th:nth-child(6),
-.reports-table td:nth-child(6) { width: 80px; min-width: 80px; } /* Tester */
+.reports-table td:nth-child(6) { width: 60px; min-width: 60px; text-align: center; } /* Tester */
 .reports-table th:nth-child(7),
-.reports-table td:nth-child(7) { width: 50px; min-width: 50px; } /* Type */
+.reports-table td:nth-child(7) { width: 60px; min-width: 60px; text-align: center;} /* Type */
 .reports-table th:nth-child(8),
-.reports-table td:nth-child(8) { width: 75px; min-width: 75px; } /* Duration */
+.reports-table td:nth-child(8) { width: 70px; min-width: 70px; text-align: center; } /* Duration */
 .reports-table th:nth-child(9),
 .reports-table td:nth-child(9),
 .reports-table th:nth-child(10),
 .reports-table td:nth-child(10),
 .reports-table th:nth-child(11),
-.reports-table td:nth-child(11) { width: 45px; min-width: 45px; text-align: center; } /* Working/Partial/Broken */
+.reports-table td:nth-child(11) { width:70px; min-width: 70px; text-align: center; } /* Working/Partial/Broken */
 .reports-table th:nth-child(12),
-.reports-table td:nth-child(12) { width: 130px; min-width: 130px; } /* Submitted */
+.reports-table td:nth-child(12) { width: 90px; min-width: 90px; white-space: nowrap; text-align: center; } /* Submitted */
 .reports-table th:nth-child(13),
-.reports-table td:nth-child(13) { width: 55px; min-width: 55px; text-align: center; } /* Revision */
+.reports-table td:nth-child(13) { width: 100px; min-width: 100px; text-align: center; } /* Revision */
 .reports-table th:nth-child(14),
-.reports-table td:nth-child(14) { width: 130px; min-width: 130px; } /* Last Modified */
+.reports-table td:nth-child(14) { width: 90px; min-width: 90px; white-space: nowrap; text-align: center; } /* Last Modified */
 .reports-table th:nth-child(15),
-.reports-table td:nth-child(15) { width: 140px; min-width: 140px; } /* Actions */
+.reports-table td:nth-child(15) { width: 100px; min-width: 100px; text-align: center; } /* Actions */
 
 .reports-table {
     table-layout: fixed;
@@ -446,6 +451,7 @@ if (!empty($reportIds)) {
     background: var(--bg-dark);
     padding: 2px 6px;
     border-radius: 3px;
+    word-break: break-all;
 }
 .commit-link:hover {
     background: var(--primary);

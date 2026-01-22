@@ -127,16 +127,16 @@ foreach ($categories as $categoryName => $tests) {
             </a>
         </h3>
         <div class="table-container">
-            <table class="sortable">
+            <table class="sortable test-breakdown-table">
                 <thead>
                     <tr>
-                        <th>Test Key</th>
-                        <th>Name</th>
+                        <th style="width: 80px;">Test Key</th>
+                        <th style="width: 25%;">Name</th>
                         <th>Expected</th>
-                        <th>Working</th>
-                        <th>Semi</th>
-                        <th>Broken</th>
-                        <th>Total</th>
+                        <th style="width: 70px; text-align: center;">Working</th>
+                        <th style="width: 70px; text-align: center;">Semi</th>
+                        <th style="width: 70px; text-align: center;">Broken</th>
+                        <th style="width: 70px; text-align: center;">Total</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -238,6 +238,49 @@ foreach ($categories as $categoryName => $tests) {
     font-size: 11px;
     font-style: italic;
 }
+
+/* Fixed column widths for test breakdown tables (7 columns) - not the Category Overview table (6 columns) */
+.card > .table-container > table.sortable.test-breakdown-table {
+    table-layout: fixed;
+    width: 100%;
+}
+
+/* Test Key column */
+.card > .table-container > table.sortable.test-breakdown-table th:nth-child(1),
+.card > .table-container > table.sortable.test-breakdown-table td:nth-child(1) {
+    width: 80px;
+    min-width: 80px;
+}
+
+/* Name column */
+.card > .table-container > table.sortable.test-breakdown-table th:nth-child(2),
+.card > .table-container > table.sortable.test-breakdown-table td:nth-child(2) {
+    width: 25%;
+    min-width: 150px;
+}
+
+/* Expected column - wrap text if needed */
+.card > .table-container > table.sortable.test-breakdown-table th:nth-child(3),
+.card > .table-container > table.sortable.test-breakdown-table td:nth-child(3) {
+    width: auto;
+    word-wrap: break-word;
+    white-space: normal;
+    line-height: 1.3;
+}
+
+/* Working/Semi/Broken/Total columns */
+.card > .table-container > table.sortable.test-breakdown-table th:nth-child(4),
+.card > .table-container > table.sortable.test-breakdown-table td:nth-child(4),
+.card > .table-container > table.sortable.test-breakdown-table th:nth-child(5),
+.card > .table-container > table.sortable.test-breakdown-table td:nth-child(5),
+.card > .table-container > table.sortable.test-breakdown-table th:nth-child(6),
+.card > .table-container > table.sortable.test-breakdown-table td:nth-child(6),
+.card > .table-container > table.sortable.test-breakdown-table th:nth-child(7),
+.card > .table-container > table.sortable.test-breakdown-table td:nth-child(7) {
+    width: 70px;
+    min-width: 70px;
+    text-align: center;
+}
 </style>
 
 <script>
@@ -293,7 +336,13 @@ if (categoryCtx && categoryData.length > 0) {
             maintainAspectRatio: false,
             plugins: {
                 legend: {
-                    position: 'bottom'
+                    position: 'bottom',
+                    labels: {
+                        color: '#292d23',
+                        font: {
+                            weight: 'bold'
+                        }
+                    }
                 },
                 tooltip: {
                     callbacks: {
@@ -309,6 +358,12 @@ if (categoryCtx && categoryData.length > 0) {
                     stacked: true,
                     grid: {
                         display: false
+                    },
+                    ticks: {
+                        color: '#292d23',
+                        font: {
+                            weight: 'bold'
+                        }
                     }
                 },
                 y: {
@@ -316,6 +371,12 @@ if (categoryCtx && categoryData.length > 0) {
                     beginAtZero: true,
                     grid: {
                         color: 'rgba(255,255,255,0.05)'
+                    },
+                    ticks: {
+                        color: '#292d23',
+                        font: {
+                            weight: 'bold'
+                        }
                     }
                 }
             },

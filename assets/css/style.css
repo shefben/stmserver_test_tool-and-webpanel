@@ -445,12 +445,17 @@ progress::-moz-progress-bar {
   z-index: 100;
 }
 
+.header .container {
+  max-width: none;
+}
+
 .header-inner {
+  max-width: 1800px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 20px;
-  max-width: 1400px;
+  padding-top: 17px;
+  padding-bottom: 17px;
   margin: 0 auto;
 }
 
@@ -854,11 +859,12 @@ tr:hover td {
   font-weight: bold;
 }
 
-.form-group input,
+.form-group input:not([type="checkbox"]):not([type="radio"]),
 .form-group select,
 .form-group textarea {
   width: 100%;
 }
+
 
 /*** File Upload Drop Zone ***/
 .file-drop-zone {
@@ -1308,7 +1314,7 @@ tr:hover td {
 .search-modal {
   width: 100%;
   max-width: 600px;
-  background: var(--bg-card);
+  background: rgba(76, 88, 68, 0.8);
   border-radius: 10px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
   border-top: solid 2px #899281;
