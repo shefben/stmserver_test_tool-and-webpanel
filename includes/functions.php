@@ -1,0 +1,402 @@
+<?php
+/**
+ * Helper functions
+ */
+
+require_once __DIR__ . '/../config.php';
+require_once __DIR__ . '/test_keys.php';
+
+// Get status color
+function getStatusColor($status) {
+    return STATUS_COLORS[$status] ?? STATUS_COLORS[''];
+}
+
+// Get status badge HTML
+function getStatusBadge($status) {
+    $color = getStatusColor($status);
+    $text = $status ?: 'Unknown';
+    return "<span class=\"status-badge\" style=\"background-color: {$color}\">{$text}</span>";
+}
+
+// Format date
+function formatDate($datetime) {
+    if (!$datetime) return 'N/A';
+    $date = new DateTime($datetime);
+    return $date->format('M j, Y g:i A');
+}
+
+// Format relative time
+function formatRelativeTime($datetime) {
+    if (!$datetime) return 'N/A';
+    $date = new DateTime($datetime);
+    $now = new DateTime();
+    $diff = $now->diff($date);
+
+    if ($diff->d == 0) {
+        if ($diff->h == 0) {
+            if ($diff->i == 0) {
+                return 'Just now';
+            }
+            return $diff->i . ' minute' . ($diff->i > 1 ? 's' : '') . ' ago';
+        }
+        return $diff->h . ' hour' . ($diff->h > 1 ? 's' : '') . ' ago';
+    } elseif ($diff->d < 7) {
+        return $diff->d . ' day' . ($diff->d > 1 ? 's' : '') . ' ago';
+    } else {
+        return $date->format('M j, Y');
+    }
+}
+
+// Sanitize output
+function e($string) {
+    return htmlspecialchars($string ?? '', ENT_QUOTES, 'UTF-8');
+}
+
+// Strip HTML tags from notes
+function cleanNotes($notes) {
+    // Handle Qt rich text HTML
+    $text = strip_tags($notes);
+    $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
+    // Remove Qt rich text CSS that leaks through
+    $text = str_replace('p, li { white-space: pre-wrap; }', '', $text);
+    $text = trim($text);
+    return $text;
+}
+
+// Truncate text
+function truncate($text, $length = 100) {
+    if (strlen($text) <= $length) return $text;
+    return substr($text, 0, $length) . '...';
+}
+
+// Format duration from seconds to human readable
+function formatDuration($seconds) {
+    if ($seconds === null || $seconds === 0) return '-';
+
+    $hours = floor($seconds / 3600);
+    $minutes = floor(($seconds % 3600) / 60);
+    $secs = $seconds % 60;
+
+    if ($hours > 0) {
+        return sprintf('%dh %dm %ds', $hours, $minutes, $secs);
+    } elseif ($minutes > 0) {
+        return sprintf('%dm %ds', $minutes, $secs);
+    } else {
+        return sprintf('%ds', $secs);
+    }
+}
+
+// Calculate percentage
+function percent($part, $total) {
+    if ($total == 0) return 0;
+    return round(($part / $total) * 100, 1);
+}
+
+// Extract short version name
+function shortVersionName($fullVersion) {
+    // Extract date and descriptive part
+    if (preg_match('/secondblob\.bin\.(\d{4}-\d{2}-\d{2}).*?(?:-\s*(.+))?$/', $fullVersion, $matches)) {
+        $date = $matches[1];
+        $desc = isset($matches[2]) ? ' - ' . trim($matches[2]) : '';
+        return $date . $desc;
+    }
+    return $fullVersion;
+}
+
+// Parse the raw JSON from test tool - returns ALL versions as an array of reports
+// Handles session_results.json format from the PyQt test tool
+function parseTestToolJson($data) {
+    // If passed a string, decode it first
+    if (is_string($data)) {
+        $data = json_decode($data, true);
+    }
+    if (!$data || !is_array($data)) return null;
+
+    // Extract metadata
+    $meta = $data['meta'] ?? [];
+
+    // Determine test type from WAN/LAN flags
+    $testType = '';
+    if (!empty($meta['WAN']) && !empty($meta['LAN'])) {
+        $testType = 'WAN/LAN';
+    } elseif (!empty($meta['WAN'])) {
+        $testType = 'WAN';
+    } elseif (!empty($meta['LAN'])) {
+        $testType = 'LAN';
+    }
+
+    // Get results - this is keyed by version ID
+    $rawResults = $data['results'] ?? [];
+
+    // If no results, return null
+    if (empty($rawResults)) {
+        return null;
+    }
+
+    // Get timing data
+    $timing = $data['timing'] ?? [];
+
+    // Get attached logs (keyed by version ID)
+    $attachedLogs = $data['attached_logs'] ?? [];
+
+    // Get per-version package info (keyed by version ID)
+    // This maps version IDs to their Steam/SteamUI package versions
+    $versionPackages = $data['version_packages'] ?? [];
+
+    // Parse ALL versions from results
+    $allReports = [];
+    foreach ($rawResults as $clientVersion => $testResults) {
+        // Flatten results into expected format
+        // Notes are stored with HTML intact - strip only when outputting to API
+        $flatResults = [];
+        foreach ($testResults as $testKey => $testData) {
+            $flatResults[$testKey] = [
+                'status' => $testData['status'] ?? '',
+                'notes' => $testData['notes'] ?? ''
+            ];
+        }
+
+        // Extract test duration from timing data (stored in seconds)
+        // Timing is keyed by version ID, so get the timing for this version
+        $testDuration = null;
+        if (!empty($timing) && isset($timing[$clientVersion])) {
+            // Get timing for this specific version
+            $versionTiming = $timing[$clientVersion];
+            if (is_numeric($versionTiming)) {
+                $testDuration = (int)$versionTiming;
+            } elseif (is_array($versionTiming) && isset($versionTiming['total'])) {
+                $testDuration = (int)$versionTiming['total'];
+            } elseif (is_array($versionTiming) && isset($versionTiming['duration'])) {
+                $testDuration = (int)$versionTiming['duration'];
+            }
+        }
+
+        // Get attached logs for this version
+        $versionLogs = $attachedLogs[$clientVersion] ?? [];
+
+        // Get per-version package versions (preferred), fall back to global meta
+        $versionPkgInfo = $versionPackages[$clientVersion] ?? [];
+        $steamuiVersion = $versionPkgInfo['steamui_version'] ?? $meta['steamui_version'] ?? null;
+        $steamPkgVersion = $versionPkgInfo['steam_pkg_version'] ?? $meta['steam_pkg_version'] ?? null;
+
+        $allReports[] = [
+            'tester' => $meta['tester'] ?? 'Unknown',
+            'commit_hash' => $meta['commit'] ?? '',
+            'test_type' => $testType,
+            'client_version' => $clientVersion,
+            'steamui_version' => $steamuiVersion,
+            'steam_pkg_version' => $steamPkgVersion,
+            'results' => $flatResults,
+            'test_duration' => $testDuration,
+            'attached_logs' => $versionLogs,
+            // Also preserve raw data for reference
+            'raw_meta' => $meta,
+            'raw_timing' => $timing,
+            'raw_completed' => $data['completed'] ?? []
+        ];
+    }
+
+    return $allReports;
+}
+
+// Generate API key
+function generateApiKey() {
+    return 'sk_' . bin2hex(random_bytes(24));
+}
+
+// JSON response helper
+function jsonResponse($data, $statusCode = 200) {
+    http_response_code($statusCode);
+    header('Content-Type: application/json');
+    echo json_encode($data);
+    exit;
+}
+
+// Flash message helpers
+function setFlash($type, $message) {
+    $_SESSION['flash'] = ['type' => $type, 'message' => $message];
+}
+
+function getFlash() {
+    if (isset($_SESSION['flash'])) {
+        $flash = $_SESSION['flash'];
+        unset($_SESSION['flash']);
+        return $flash;
+    }
+    return null;
+}
+
+// Render flash message
+function renderFlash() {
+    $flash = getFlash();
+    if (!$flash) return '';
+
+    $type = $flash['type'];
+    $message = e($flash['message']);
+
+    return "<div class=\"flash-message {$type}\">{$message}</div>";
+}
+
+// Get current page
+function getCurrentPage() {
+    return $_GET['page'] ?? 'dashboard';
+}
+
+// Get base URL for the application
+function getBaseUrl() {
+    $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
+    $scriptDir = dirname($_SERVER['SCRIPT_NAME']);
+    // Clean up the path
+    $scriptDir = rtrim($scriptDir, '/\\');
+    return $protocol . '://' . $host . $scriptDir;
+}
+
+// Build URL with params
+function buildUrl($page, $params = []) {
+    $url = "?page={$page}";
+    foreach ($params as $key => $value) {
+        $url .= "&{$key}=" . urlencode($value);
+    }
+    return $url;
+}
+
+// Pagination helper
+function getPagination($currentPage, $totalPages, $basePage) {
+    $html = '<div class="pagination">';
+
+    if ($currentPage > 1) {
+        $html .= '<a href="' . buildUrl($basePage, ['p' => $currentPage - 1]) . '" class="btn btn-sm">Prev</a>';
+    }
+
+    $start = max(1, $currentPage - 2);
+    $end = min($totalPages, $currentPage + 2);
+
+    for ($i = $start; $i <= $end; $i++) {
+        $active = $i === $currentPage ? ' active' : '';
+        $html .= '<a href="' . buildUrl($basePage, ['p' => $i]) . '" class="btn btn-sm' . $active . '">' . $i . '</a>';
+    }
+
+    if ($currentPage < $totalPages) {
+        $html .= '<a href="' . buildUrl($basePage, ['p' => $currentPage + 1]) . '" class="btn btn-sm">Next</a>';
+    }
+
+    $html .= '</div>';
+    return $html;
+}
+
+// Count status totals from results
+function countStatusTotals($results) {
+    $totals = [
+        'Working' => 0,
+        'Semi-working' => 0,
+        'Not working' => 0,
+        'N/A' => 0
+    ];
+
+    foreach ($results as $version => $tests) {
+        foreach ($tests as $testKey => $testData) {
+            $status = $testData['status'] ?? '';
+            if (isset($totals[$status])) {
+                $totals[$status]++;
+            }
+        }
+    }
+
+    return $totals;
+}
+
+/**
+ * Check if GitHub integration is configured
+ */
+function isGitHubConfigured() {
+    return defined('GITHUB_OWNER') && defined('GITHUB_REPO') && defined('GITHUB_TOKEN')
+        && GITHUB_OWNER !== '' && GITHUB_REPO !== '' && GITHUB_TOKEN !== '';
+}
+
+/**
+ * Get GitHub revision history from cache
+ * Returns array of commits keyed by SHA with structure:
+ * [
+ *   "<sha>" => [
+ *     "notes" => "commit message",
+ *     "files" => ["added"=>[], "removed"=>[], "modified"=>[]],
+ *     "ts" => unix_timestamp
+ *   ],
+ *   ...
+ * ]
+ * Ordered by timestamp (newest first)
+ */
+function getGitHubRevisions($forceRefresh = false) {
+    if (!isGitHubConfigured()) {
+        return [];
+    }
+
+    require_once __DIR__ . '/../api/githubrevisiongrabber.php';
+
+    $cacheDir = __DIR__ . '/../data';
+    if (!is_dir($cacheDir)) {
+        mkdir($cacheDir, 0755, true);
+    }
+
+    try {
+        $cache = new GitHubRepoHistoryCache(
+            GITHUB_TOKEN,
+            $cacheDir
+        );
+
+        $ttl = $forceRefresh ? 0 : 60; // 0 TTL forces refresh
+        $commits = $cache->getHistory(GITHUB_OWNER, GITHUB_REPO, [
+            'branch' => 'main',
+            'ttl_seconds' => $ttl,
+            'max_commits' => 5000
+        ]);
+
+        // Sort by timestamp (newest first)
+        uasort($commits, function($a, $b) {
+            return ($b['ts'] ?? 0) <=> ($a['ts'] ?? 0);
+        });
+
+        return $commits;
+    } catch (Exception $e) {
+        error_log("GitHub revision fetch error: " . $e->getMessage());
+        return [];
+    }
+}
+
+/**
+ * Get a single revision's details by SHA
+ */
+function getRevisionBySha($sha) {
+    $revisions = getGitHubRevisions();
+    return $revisions[$sha] ?? null;
+}
+
+/**
+ * Format revision timestamp to readable date/time
+ */
+function formatRevisionDateTime($timestamp) {
+    if (!$timestamp) return 'Unknown';
+    return date('Y-m-d H:i:s', $timestamp);
+}
+
+/**
+ * Get revisions as dropdown options array
+ * Returns array of ['hash' => sha, 'label' => 'sha - date time', 'ts' => timestamp]
+ */
+function getRevisionDropdownOptions() {
+    $revisions = getGitHubRevisions();
+    $options = [];
+
+    foreach ($revisions as $sha => $data) {
+        $dateTime = formatRevisionDateTime($data['ts'] ?? 0);
+        $shortSha = substr($sha, 0, 8);
+        $options[] = [
+            'hash' => $sha,
+            'label' => $shortSha . ' - ' . $dateTime,
+            'ts' => $data['ts'] ?? 0
+        ];
+    }
+
+    return $options;
+}

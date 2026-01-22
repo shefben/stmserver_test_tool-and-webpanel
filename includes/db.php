@@ -1,0 +1,1969 @@
+<?php
+/**
+ * Database connection and operations
+ * Uses MySQL with PDO for database operations
+ */
+
+require_once __DIR__ . '/../config.php';
+
+class Database {
+    private static $instance = null;
+    private $pdo;
+
+    private function __construct() {
+        $port = defined('DB_PORT') ? DB_PORT : '3306';
+        $dsn = "mysql:host=" . DB_HOST . ";port=" . $port . ";dbname=" . DB_NAME . ";charset=" . DB_CHARSET;
+        $options = [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false,
+        ];
+
+        try {
+            $this->pdo = new PDO($dsn, DB_USER, DB_PASS, $options);
+        } catch (PDOException $e) {
+            throw new Exception("Database connection failed: " . $e->getMessage());
+        }
+    }
+
+    public static function getInstance() {
+        if (self::$instance === null) {
+            self::$instance = new self();
+        }
+        return self::$instance;
+    }
+
+    /**
+     * Get PDO instance for direct queries
+     */
+    public function getPdo() {
+        return $this->pdo;
+    }
+
+    /**
+     * Insert a new report (automatically handles revisions)
+     * Different commit hashes are treated as separate reports
+     */
+    public function insertReport($tester, $commitHash, $testType, $clientVersion, $rawJson, $testDuration = null, $steamuiVersion = null, $steamPkgVersion = null) {
+        // Check for existing report with same tester+version+test_type+commit_hash
+        // Different commit hashes will create new reports instead of updating existing ones
+        $existingReport = $this->findExistingReport($tester, $clientVersion, $testType, $commitHash);
+
+        if ($existingReport) {
+            // Archive the existing report as a revision
+            $this->archiveReportAsRevision($existingReport['id']);
+
+            // Update the existing report with new data
+            // Note: submitted_at is NOT updated - it preserves the original submission date
+            // The last_modified column auto-updates on change to track when the report was last revised
+            $stmt = $this->pdo->prepare("
+                UPDATE reports SET
+                    commit_hash = ?,
+                    raw_json = ?,
+                    test_duration = ?,
+                    steamui_version = ?,
+                    steam_pkg_version = ?,
+                    revision_count = revision_count + 1
+                WHERE id = ?
+            ");
+            $stmt->execute([$commitHash, $rawJson, $testDuration, $steamuiVersion, $steamPkgVersion, $existingReport['id']]);
+
+            // Delete old test results for this report
+            $stmt = $this->pdo->prepare("DELETE FROM test_results WHERE report_id = ?");
+            $stmt->execute([$existingReport['id']]);
+
+            return $existingReport['id'];
+        }
+
+        // Create new report
+        $stmt = $this->pdo->prepare("
+            INSERT INTO reports (tester, commit_hash, test_type, client_version, submitted_at, raw_json, test_duration, steamui_version, steam_pkg_version, revision_count)
+            VALUES (?, ?, ?, ?, NOW(), ?, ?, ?, ?, 0)
+        ");
+        $stmt->execute([$tester, $commitHash, $testType, $clientVersion, $rawJson, $testDuration, $steamuiVersion, $steamPkgVersion]);
+
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Find existing report for same tester+version+test_type+commit_hash
+     * Different commit hashes are treated as separate reports
+     */
+    private function findExistingReport($tester, $clientVersion, $testType, $commitHash = null) {
+        // If commit_hash is provided, include it in the lookup
+        // This ensures different commits are treated as separate reports
+        if ($commitHash !== null && $commitHash !== '') {
+            $stmt = $this->pdo->prepare("
+                SELECT * FROM reports
+                WHERE tester = ? AND client_version = ? AND test_type = ? AND commit_hash = ?
+                LIMIT 1
+            ");
+            $stmt->execute([$tester, $clientVersion, $testType, $commitHash]);
+        } else {
+            // No commit hash - find any report without a commit hash
+            $stmt = $this->pdo->prepare("
+                SELECT * FROM reports
+                WHERE tester = ? AND client_version = ? AND test_type = ? AND (commit_hash IS NULL OR commit_hash = '')
+                LIMIT 1
+            ");
+            $stmt->execute([$tester, $clientVersion, $testType]);
+        }
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Archive a report as a revision (preserves history with diffs)
+     */
+    private function archiveReportAsRevision($reportId, $previousTestResults = null) {
+        $report = $this->getReport($reportId);
+        if (!$report) return false;
+
+        // Get test results for this report
+        $testResults = $this->getTestResults($reportId);
+
+        // Get the current revision number (which will be assigned to this archive)
+        $revisionNumber = $report['revision_count'];
+
+        // Calculate diff from previous revision if available
+        $changesDiff = null;
+        if ($previousTestResults !== null) {
+            $changesDiff = $this->calculateTestResultsDiff($previousTestResults, $testResults);
+        } else {
+            // Try to get previous revision to calculate diff
+            $prevRevision = $this->getLatestRevision($reportId);
+            if ($prevRevision) {
+                $changesDiff = $this->calculateTestResultsDiff($prevRevision['test_results'], $testResults);
+            }
+        }
+
+        // Create revision entry
+        $stmt = $this->pdo->prepare("
+            INSERT INTO report_revisions
+            (report_id, revision_number, tester, commit_hash, test_type, client_version, steamui_version, steam_pkg_version, submitted_at, archived_at, raw_json, test_results, changes_diff)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?, ?)
+        ");
+        $stmt->execute([
+            $reportId,
+            $revisionNumber,
+            $report['tester'],
+            $report['commit_hash'],
+            $report['test_type'],
+            $report['client_version'],
+            $report['steamui_version'] ?? null,
+            $report['steam_pkg_version'] ?? null,
+            $report['submitted_at'],
+            $report['raw_json'],
+            json_encode($testResults),
+            $changesDiff ? json_encode($changesDiff) : null
+        ]);
+
+        return true;
+    }
+
+    /**
+     * Calculate diff between two sets of test results
+     */
+    private function calculateTestResultsDiff($oldResults, $newResults) {
+        $diff = [
+            'changed' => [],
+            'added' => [],
+            'removed' => []
+        ];
+
+        // Index old results by test_key
+        $oldByKey = [];
+        foreach ($oldResults as $result) {
+            $oldByKey[$result['test_key']] = $result;
+        }
+
+        // Index new results by test_key
+        $newByKey = [];
+        foreach ($newResults as $result) {
+            $newByKey[$result['test_key']] = $result;
+        }
+
+        // Find changed and added
+        foreach ($newByKey as $key => $newResult) {
+            if (isset($oldByKey[$key])) {
+                $oldResult = $oldByKey[$key];
+                if ($oldResult['status'] !== $newResult['status'] ||
+                    ($oldResult['notes'] ?? '') !== ($newResult['notes'] ?? '')) {
+                    $diff['changed'][] = [
+                        'test_key' => $key,
+                        'old_status' => $oldResult['status'],
+                        'new_status' => $newResult['status'],
+                        'old_notes' => $oldResult['notes'] ?? '',
+                        'new_notes' => $newResult['notes'] ?? ''
+                    ];
+                }
+            } else {
+                $diff['added'][] = [
+                    'test_key' => $key,
+                    'status' => $newResult['status'],
+                    'notes' => $newResult['notes'] ?? ''
+                ];
+            }
+        }
+
+        // Find removed
+        foreach ($oldByKey as $key => $oldResult) {
+            if (!isset($newByKey[$key])) {
+                $diff['removed'][] = [
+                    'test_key' => $key,
+                    'status' => $oldResult['status'],
+                    'notes' => $oldResult['notes'] ?? ''
+                ];
+            }
+        }
+
+        // Return null if no changes
+        if (empty($diff['changed']) && empty($diff['added']) && empty($diff['removed'])) {
+            return null;
+        }
+
+        return $diff;
+    }
+
+    /**
+     * Get the latest revision for a report
+     */
+    private function getLatestRevision($reportId) {
+        $stmt = $this->pdo->prepare("
+            SELECT * FROM report_revisions
+            WHERE report_id = ?
+            ORDER BY revision_number DESC
+            LIMIT 1
+        ");
+        $stmt->execute([$reportId]);
+        $revision = $stmt->fetch();
+
+        if ($revision) {
+            $revision['test_results'] = json_decode($revision['test_results'], true) ?? [];
+        }
+
+        return $revision ?: null;
+    }
+
+    /**
+     * Insert a test result
+     */
+    public function insertTestResult($reportId, $testKey, $status, $notes = '') {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO test_results (report_id, test_key, status, notes)
+            VALUES (?, ?, ?, ?)
+        ");
+        return $stmt->execute([$reportId, $testKey, $status, $notes]);
+    }
+
+    /**
+     * Batch insert multiple test results (much faster for large reports)
+     */
+    public function insertTestResultsBatch($reportId, $results) {
+        if (empty($results)) {
+            return 0;
+        }
+
+        $values = [];
+        $params = [];
+        foreach ($results as $testKey => $result) {
+            $values[] = "(?, ?, ?, ?)";
+            $params[] = $reportId;
+            $params[] = $testKey;
+            $params[] = $result['status'] ?? '';
+            $params[] = $result['notes'] ?? '';
+        }
+
+        $sql = "INSERT INTO test_results (report_id, test_key, status, notes) VALUES " . implode(", ", $values);
+        $stmt = $this->pdo->prepare($sql);
+        $stmt->execute($params);
+
+        return count($results);
+    }
+
+    /**
+     * Get reports with pagination and filters
+     */
+    public function getReports($limit = 20, $offset = 0, $filters = []) {
+        $where = [];
+        $params = [];
+
+        if (!empty($filters['client_version'])) {
+            $where[] = "client_version = ?";
+            $params[] = $filters['client_version'];
+        }
+        if (!empty($filters['test_type'])) {
+            $where[] = "test_type = ?";
+            $params[] = $filters['test_type'];
+        }
+        if (!empty($filters['tester'])) {
+            $where[] = "tester = ?";
+            $params[] = $filters['tester'];
+        }
+        if (!empty($filters['commit_hash'])) {
+            $where[] = "commit_hash = ?";
+            $params[] = $filters['commit_hash'];
+        }
+        if (!empty($filters['steamui_version'])) {
+            $where[] = "steamui_version = ?";
+            $params[] = $filters['steamui_version'];
+        }
+        if (!empty($filters['steam_pkg_version'])) {
+            $where[] = "steam_pkg_version = ?";
+            $params[] = $filters['steam_pkg_version'];
+        }
+
+        $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
+
+        $stmt = $this->pdo->prepare("
+            SELECT * FROM reports
+            $whereClause
+            ORDER BY submitted_at DESC
+            LIMIT ? OFFSET ?
+        ");
+
+        $params[] = (int)$limit;
+        $params[] = (int)$offset;
+        $stmt->execute($params);
+
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Count reports with filters
+     */
+    public function countReports($filters = []) {
+        $where = [];
+        $params = [];
+
+        if (!empty($filters['client_version'])) {
+            $where[] = "client_version = ?";
+            $params[] = $filters['client_version'];
+        }
+        if (!empty($filters['test_type'])) {
+            $where[] = "test_type = ?";
+            $params[] = $filters['test_type'];
+        }
+        if (!empty($filters['tester'])) {
+            $where[] = "tester = ?";
+            $params[] = $filters['tester'];
+        }
+        if (!empty($filters['commit_hash'])) {
+            $where[] = "commit_hash = ?";
+            $params[] = $filters['commit_hash'];
+        }
+        if (!empty($filters['steamui_version'])) {
+            $where[] = "steamui_version = ?";
+            $params[] = $filters['steamui_version'];
+        }
+        if (!empty($filters['steam_pkg_version'])) {
+            $where[] = "steam_pkg_version = ?";
+            $params[] = $filters['steam_pkg_version'];
+        }
+
+        $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
+
+        $stmt = $this->pdo->prepare("SELECT COUNT(*) as count FROM reports $whereClause");
+        $stmt->execute($params);
+        $result = $stmt->fetch();
+
+        return $result['count'];
+    }
+
+    /**
+     * Get a single report
+     */
+    public function getReport($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM reports WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get test results for a report
+     */
+    public function getTestResults($reportId) {
+        $stmt = $this->pdo->prepare("
+            SELECT * FROM test_results
+            WHERE report_id = ?
+            ORDER BY CAST(test_key AS UNSIGNED), test_key
+        ");
+        $stmt->execute([$reportId]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get stats for a specific report
+     */
+    public function getReportStats($reportId) {
+        $stmt = $this->pdo->prepare("
+            SELECT
+                SUM(CASE WHEN status = 'Working' THEN 1 ELSE 0 END) as working,
+                SUM(CASE WHEN status = 'Semi-working' THEN 1 ELSE 0 END) as semi_working,
+                SUM(CASE WHEN status = 'Not working' THEN 1 ELSE 0 END) as not_working,
+                SUM(CASE WHEN status = 'N/A' THEN 1 ELSE 0 END) as na
+            FROM test_results
+            WHERE report_id = ?
+        ");
+        $stmt->execute([$reportId]);
+        $result = $stmt->fetch();
+
+        return [
+            'working' => (int)($result['working'] ?? 0),
+            'semi_working' => (int)($result['semi_working'] ?? 0),
+            'not_working' => (int)($result['not_working'] ?? 0),
+            'na' => (int)($result['na'] ?? 0)
+        ];
+    }
+
+    /**
+     * Get overall statistics
+     */
+    public function getStats() {
+        $stmt = $this->pdo->query("SELECT COUNT(*) as total FROM reports");
+        $totalReports = $stmt->fetch()['total'];
+
+        $stmt = $this->pdo->query("
+            SELECT
+                SUM(CASE WHEN status = 'Working' THEN 1 ELSE 0 END) as working,
+                SUM(CASE WHEN status = 'Semi-working' THEN 1 ELSE 0 END) as semi_working,
+                SUM(CASE WHEN status = 'Not working' THEN 1 ELSE 0 END) as not_working
+            FROM test_results
+        ");
+        $result = $stmt->fetch();
+
+        return [
+            'total_reports' => (int)$totalReports,
+            'working' => (int)($result['working'] ?? 0),
+            'semi_working' => (int)($result['semi_working'] ?? 0),
+            'not_working' => (int)($result['not_working'] ?? 0)
+        ];
+    }
+
+    /**
+     * Get most problematic tests (highest failure rate)
+     */
+    public function getProblematicTests($limit = 10) {
+        $stmt = $this->pdo->prepare("
+            SELECT
+                test_key,
+                SUM(CASE WHEN status = 'Not working' THEN 1 ELSE 0 END) as fail_count,
+                COUNT(*) as total_count,
+                (SUM(CASE WHEN status = 'Not working' THEN 1 ELSE 0 END) / COUNT(*)) * 100 as fail_rate
+            FROM test_results
+            WHERE status != 'N/A' AND status != ''
+            GROUP BY test_key
+            HAVING fail_count > 0
+            ORDER BY fail_rate DESC
+            LIMIT ?
+        ");
+        $stmt->execute([$limit]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get version trend data (stats grouped by version)
+     */
+    public function getVersionTrend() {
+        $stmt = $this->pdo->query("
+            SELECT
+                r.client_version,
+                SUM(CASE WHEN tr.status = 'Working' THEN 1 ELSE 0 END) as working,
+                SUM(CASE WHEN tr.status = 'Semi-working' THEN 1 ELSE 0 END) as semi_working,
+                SUM(CASE WHEN tr.status = 'Not working' THEN 1 ELSE 0 END) as not_working
+            FROM reports r
+            LEFT JOIN test_results tr ON r.id = tr.report_id
+            GROUP BY r.client_version
+            ORDER BY r.client_version
+        ");
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get stats for each test key
+     */
+    public function getTestStats() {
+        $stmt = $this->pdo->query("
+            SELECT
+                test_key,
+                SUM(CASE WHEN status = 'Working' THEN 1 ELSE 0 END) as working,
+                SUM(CASE WHEN status = 'Semi-working' THEN 1 ELSE 0 END) as semi_working,
+                SUM(CASE WHEN status = 'Not working' THEN 1 ELSE 0 END) as not_working,
+                COUNT(*) as total
+            FROM test_results
+            WHERE status != 'N/A' AND status != ''
+            GROUP BY test_key
+            ORDER BY CAST(test_key AS UNSIGNED), test_key
+        ");
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get unique values from a column
+     */
+    public function getUniqueValues($table, $column) {
+        // Whitelist allowed tables and columns
+        $allowed = [
+            'reports' => ['client_version', 'test_type', 'tester', 'commit_hash', 'steamui_version', 'steam_pkg_version'],
+            'test_results' => ['test_key', 'status']
+        ];
+
+        if (!isset($allowed[$table]) || !in_array($column, $allowed[$table])) {
+            return [];
+        }
+
+        $stmt = $this->pdo->query("SELECT DISTINCT `$column` FROM `$table` WHERE `$column` IS NOT NULL AND `$column` != '' ORDER BY `$column`");
+        return $stmt->fetchAll(PDO::FETCH_COLUMN);
+    }
+
+    /**
+     * Get stats for a specific version
+     */
+    public function getVersionStats($version) {
+        $stmt = $this->pdo->prepare("
+            SELECT
+                COUNT(DISTINCT r.id) as report_count,
+                SUM(CASE WHEN tr.status = 'Working' THEN 1 ELSE 0 END) as working,
+                SUM(CASE WHEN tr.status = 'Semi-working' THEN 1 ELSE 0 END) as semi_working,
+                SUM(CASE WHEN tr.status = 'Not working' THEN 1 ELSE 0 END) as not_working
+            FROM reports r
+            LEFT JOIN test_results tr ON r.id = tr.report_id
+            WHERE r.client_version = ?
+        ");
+        $stmt->execute([$version]);
+        $result = $stmt->fetch();
+
+        return [
+            'report_count' => (int)($result['report_count'] ?? 0),
+            'working' => (int)($result['working'] ?? 0),
+            'semi_working' => (int)($result['semi_working'] ?? 0),
+            'not_working' => (int)($result['not_working'] ?? 0)
+        ];
+    }
+
+    /**
+     * Get average test duration for a specific version (in seconds)
+     */
+    public function getVersionAverageDuration($version) {
+        $stmt = $this->pdo->prepare("
+            SELECT AVG(test_duration) as avg_duration
+            FROM reports
+            WHERE client_version = ? AND test_duration IS NOT NULL AND test_duration > 0
+        ");
+        $stmt->execute([$version]);
+        $result = $stmt->fetch();
+
+        return $result['avg_duration'] ? (int)round($result['avg_duration']) : null;
+    }
+
+    /**
+     * Get version matrix (most common status for each version/test combination)
+     */
+    public function getVersionMatrix() {
+        $stmt = $this->pdo->query("
+            SELECT
+                r.client_version,
+                tr.test_key,
+                tr.status,
+                COUNT(*) as count
+            FROM reports r
+            JOIN test_results tr ON r.id = tr.report_id
+            WHERE tr.status IS NOT NULL AND tr.status != ''
+            GROUP BY r.client_version, tr.test_key, tr.status
+            ORDER BY r.client_version, tr.test_key
+        ");
+        $rows = $stmt->fetchAll();
+
+        // Process to find most common status per version/test
+        $counts = [];
+        foreach ($rows as $row) {
+            $key = $row['client_version'] . '|' . $row['test_key'];
+            if (!isset($counts[$key]) || $row['count'] > $counts[$key]['count']) {
+                $counts[$key] = [
+                    'client_version' => $row['client_version'],
+                    'test_key' => $row['test_key'],
+                    'most_common_status' => $row['status'],
+                    'count' => $row['count']
+                ];
+            }
+        }
+
+        return array_values($counts);
+    }
+
+    /**
+     * Delete a report and its test results
+     */
+    public function deleteReport($id) {
+        // Foreign key with ON DELETE CASCADE handles test_results
+        $stmt = $this->pdo->prepare("DELETE FROM reports WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Get filtered test results with report info
+     */
+    public function getFilteredResults($status = '', $version = '', $testKey = '', $tester = '', $reportId = 0, $commitHash = '') {
+        $where = [];
+        $params = [];
+
+        if ($status) {
+            $where[] = "tr.status = ?";
+            $params[] = $status;
+        }
+        if ($version) {
+            $where[] = "r.client_version = ?";
+            $params[] = $version;
+        }
+        if ($testKey) {
+            $where[] = "tr.test_key = ?";
+            $params[] = $testKey;
+        }
+        if ($tester) {
+            $where[] = "r.tester = ?";
+            $params[] = $tester;
+        }
+        if ($reportId) {
+            $where[] = "tr.report_id = ?";
+            $params[] = $reportId;
+        }
+        if ($commitHash) {
+            $where[] = "r.commit_hash = ?";
+            $params[] = $commitHash;
+        }
+
+        $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
+
+        $stmt = $this->pdo->prepare("
+            SELECT
+                tr.id,
+                tr.report_id,
+                tr.test_key,
+                tr.status,
+                tr.notes,
+                r.client_version,
+                r.tester,
+                r.test_type,
+                r.commit_hash,
+                r.submitted_at
+            FROM test_results tr
+            JOIN reports r ON tr.report_id = r.id
+            $whereClause
+            ORDER BY r.submitted_at DESC, CAST(tr.test_key AS UNSIGNED), tr.test_key
+        ");
+        $stmt->execute($params);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get results for a specific category
+     */
+    public function getResultsByCategory($category) {
+        $categories = getTestCategories();
+        if (!isset($categories[$category])) {
+            return [];
+        }
+
+        $testKeys = array_keys($categories[$category]);
+        $placeholders = str_repeat('?,', count($testKeys) - 1) . '?';
+
+        $stmt = $this->pdo->prepare("
+            SELECT
+                tr.id,
+                tr.report_id,
+                tr.test_key,
+                tr.status,
+                tr.notes,
+                r.client_version,
+                r.tester,
+                r.test_type,
+                r.submitted_at
+            FROM test_results tr
+            JOIN reports r ON tr.report_id = r.id
+            WHERE tr.test_key IN ($placeholders)
+            ORDER BY r.submitted_at DESC, CAST(tr.test_key AS UNSIGNED), tr.test_key
+        ");
+        $stmt->execute($testKeys);
+        return $stmt->fetchAll();
+    }
+
+    // =====================
+    // USER MANAGEMENT
+    // =====================
+
+    /**
+     * Initialize default admin if no users exist
+     */
+    public function initializeUsers() {
+        $stmt = $this->pdo->query("SELECT COUNT(*) as count FROM users");
+        $count = $stmt->fetch()['count'];
+
+        if ($count == 0) {
+            $this->createUser('admin', 'steamtest2024', 'admin');
+        }
+    }
+
+    /**
+     * Get user by username
+     */
+    public function getUser($username) {
+        $stmt = $this->pdo->prepare("SELECT * FROM users WHERE username = ?");
+        $stmt->execute([$username]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get user by API key
+     */
+    public function getUserByApiKey($apiKey) {
+        $stmt = $this->pdo->prepare("SELECT * FROM users WHERE api_key = ?");
+        $stmt->execute([$apiKey]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get all users
+     */
+    public function getUsers() {
+        $stmt = $this->pdo->query("SELECT * FROM users ORDER BY created_at DESC");
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Create a new user
+     */
+    public function createUser($username, $password, $role = 'user') {
+        // Check if user exists
+        if ($this->getUser($username)) {
+            return false;
+        }
+
+        $apiKey = $this->generateApiKey();
+        $passwordHash = password_hash($password, PASSWORD_DEFAULT);
+
+        $stmt = $this->pdo->prepare("
+            INSERT INTO users (username, password, role, api_key, created_at)
+            VALUES (?, ?, ?, ?, NOW())
+        ");
+        $stmt->execute([$username, $passwordHash, $role, $apiKey]);
+
+        return $this->getUser($username);
+    }
+
+    /**
+     * Update user
+     */
+    public function updateUser($username, $data) {
+        $user = $this->getUser($username);
+        if (!$user) {
+            return false;
+        }
+
+        $updates = [];
+        $params = [];
+
+        if (isset($data['password']) && !empty($data['password'])) {
+            $updates[] = "password = ?";
+            $params[] = password_hash($data['password'], PASSWORD_DEFAULT);
+        }
+        if (isset($data['role'])) {
+            $updates[] = "role = ?";
+            $params[] = $data['role'];
+        }
+
+        if (empty($updates)) {
+            return true;
+        }
+
+        $params[] = $username;
+        $stmt = $this->pdo->prepare("UPDATE users SET " . implode(", ", $updates) . " WHERE username = ?");
+        return $stmt->execute($params);
+    }
+
+    /**
+     * Delete user
+     */
+    public function deleteUser($username) {
+        if ($username === 'admin') {
+            return false;
+        }
+
+        $stmt = $this->pdo->prepare("DELETE FROM users WHERE username = ?");
+        return $stmt->execute([$username]);
+    }
+
+    /**
+     * Regenerate API key for user
+     */
+    public function regenerateApiKey($username) {
+        $newKey = $this->generateApiKey();
+        $stmt = $this->pdo->prepare("UPDATE users SET api_key = ? WHERE username = ?");
+        if ($stmt->execute([$newKey, $username])) {
+            return $newKey;
+        }
+        return false;
+    }
+
+    /**
+     * Generate a random API key
+     */
+    private function generateApiKey() {
+        return 'sk_' . bin2hex(random_bytes(24));
+    }
+
+    /**
+     * Verify user password
+     */
+    public function verifyPassword($username, $password) {
+        $user = $this->getUser($username);
+        if (!$user) {
+            return false;
+        }
+        return password_verify($password, $user['password']);
+    }
+
+    // =====================
+    // REPORT MANAGEMENT
+    // =====================
+
+    /**
+     * Update a report (creates revision when fields are modified)
+     */
+    public function updateReport($id, $data, $createRevision = true) {
+        $report = $this->getReport($id);
+        if (!$report) return false;
+
+        $updates = [];
+        $params = [];
+        $hasChanges = false;
+
+        if (isset($data['client_version']) && $data['client_version'] !== $report['client_version']) {
+            $updates[] = "client_version = ?";
+            $params[] = $data['client_version'];
+            $hasChanges = true;
+        }
+        if (isset($data['test_type']) && $data['test_type'] !== $report['test_type']) {
+            $updates[] = "test_type = ?";
+            $params[] = $data['test_type'];
+            $hasChanges = true;
+        }
+        if (isset($data['commit_hash']) && $data['commit_hash'] !== $report['commit_hash']) {
+            $updates[] = "commit_hash = ?";
+            $params[] = $data['commit_hash'];
+            $hasChanges = true;
+        }
+        if (array_key_exists('steamui_version', $data) && $data['steamui_version'] !== ($report['steamui_version'] ?? null)) {
+            $updates[] = "steamui_version = ?";
+            $params[] = $data['steamui_version'];
+            $hasChanges = true;
+        }
+        if (array_key_exists('steam_pkg_version', $data) && $data['steam_pkg_version'] !== ($report['steam_pkg_version'] ?? null)) {
+            $updates[] = "steam_pkg_version = ?";
+            $params[] = $data['steam_pkg_version'];
+            $hasChanges = true;
+        }
+
+        if (empty($updates)) {
+            return true;
+        }
+
+        // Create revision before making changes (if there are actual changes)
+        if ($createRevision && $hasChanges) {
+            $this->archiveReportAsRevision($id);
+            $updates[] = "revision_count = revision_count + 1";
+        }
+
+        // Always update last_modified
+        $updates[] = "last_modified = NOW()";
+
+        $params[] = $id;
+        $stmt = $this->pdo->prepare("UPDATE reports SET " . implode(", ", $updates) . " WHERE id = ?");
+        return $stmt->execute($params);
+    }
+
+    /**
+     * Update a test result (creates revision when modified)
+     */
+    public function updateTestResult($id, $status, $notes = null, $createRevision = true) {
+        // Get the current test result to check for changes
+        $testResult = $this->getTestResult($id);
+        if (!$testResult) return false;
+
+        $hasChanges = false;
+        if ($testResult['status'] !== $status) {
+            $hasChanges = true;
+        }
+        if ($notes !== null && ($testResult['notes'] ?? '') !== $notes) {
+            $hasChanges = true;
+        }
+
+        // Create revision before making changes (if there are actual changes)
+        if ($createRevision && $hasChanges) {
+            $this->archiveReportAsRevision($testResult['report_id']);
+            // Increment revision count
+            $stmt = $this->pdo->prepare("UPDATE reports SET revision_count = revision_count + 1, last_modified = NOW() WHERE id = ?");
+            $stmt->execute([$testResult['report_id']]);
+        } elseif ($hasChanges) {
+            // Still update last_modified even if not creating revision
+            $stmt = $this->pdo->prepare("UPDATE reports SET last_modified = NOW() WHERE id = ?");
+            $stmt->execute([$testResult['report_id']]);
+        }
+
+        if ($notes !== null) {
+            $stmt = $this->pdo->prepare("UPDATE test_results SET status = ?, notes = ? WHERE id = ?");
+            return $stmt->execute([$status, $notes, $id]);
+        } else {
+            $stmt = $this->pdo->prepare("UPDATE test_results SET status = ? WHERE id = ?");
+            return $stmt->execute([$status, $id]);
+        }
+    }
+
+    /**
+     * Get a single test result by ID
+     */
+    public function getTestResult($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM test_results WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    // =====================
+    // RETEST REQUESTS
+    // =====================
+
+    /**
+     * Add a retest request for a specific test/blob combination
+     */
+    public function addRetestRequest($testKey, $clientVersion, $createdBy, $reason = '', $notes = '', $reportId = null, $reportRevision = null) {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO retest_requests (report_id, report_revision, test_key, client_version, created_by, reason, notes, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
+        ");
+        $stmt->execute([$reportId, $reportRevision, $testKey, $clientVersion, $createdBy, $reason, $notes]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Get all retest requests
+     */
+    public function getRetestRequests($status = null) {
+        if ($status !== null) {
+            $stmt = $this->pdo->prepare("SELECT * FROM retest_requests WHERE status = ? ORDER BY created_at DESC");
+            $stmt->execute([$status]);
+        } else {
+            $stmt = $this->pdo->query("SELECT * FROM retest_requests ORDER BY created_at DESC");
+        }
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get pending retest requests for a specific client/user (for API)
+     */
+    public function getPendingRetestsForClient($clientVersion = null) {
+        if ($clientVersion) {
+            $stmt = $this->pdo->prepare("SELECT * FROM retest_requests WHERE status = 'pending' AND client_version = ?");
+            $stmt->execute([$clientVersion]);
+        } else {
+            $stmt = $this->pdo->query("SELECT * FROM retest_requests WHERE status = 'pending'");
+        }
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Mark a retest request as completed
+     */
+    public function completeRetestRequest($id) {
+        $stmt = $this->pdo->prepare("UPDATE retest_requests SET status = 'completed', completed_at = NOW() WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Delete a retest request
+     */
+    public function deleteRetestRequest($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM retest_requests WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Get a single retest request
+     */
+    public function getRetestRequest($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM retest_requests WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Check if a pending retest request exists for a specific test/version
+     */
+    public function hasPendingRetestRequest($testKey, $clientVersion) {
+        $stmt = $this->pdo->prepare("
+            SELECT id FROM retest_requests
+            WHERE test_key = ? AND client_version = ? AND status = 'pending'
+            LIMIT 1
+        ");
+        $stmt->execute([$testKey, $clientVersion]);
+        return $stmt->fetch() !== false;
+    }
+
+    /**
+     * Get all pending retest requests as a lookup map (test_key|client_version => true)
+     * Optimized for batch checking in table views
+     */
+    public function getPendingRetestRequestsMap() {
+        $stmt = $this->pdo->query("
+            SELECT test_key, client_version FROM retest_requests WHERE status = 'pending'
+        ");
+        $map = [];
+        while ($row = $stmt->fetch()) {
+            $key = $row['test_key'] . '|' . $row['client_version'];
+            $map[$key] = true;
+        }
+        return $map;
+    }
+
+    // =====================
+    // FIXED TESTS
+    // =====================
+
+    /**
+     * Mark a test as fixed (triggers retest with latest revision)
+     */
+    public function addFixedTest($testKey, $clientVersion, $fixedBy, $commitHash = '', $notes = '') {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO fixed_tests (test_key, client_version, fixed_by, commit_hash, notes, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending_retest', NOW())
+        ");
+        $stmt->execute([$testKey, $clientVersion, $fixedBy, $commitHash, $notes]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Get all fixed tests
+     */
+    public function getFixedTests($status = null) {
+        if ($status !== null) {
+            $stmt = $this->pdo->prepare("SELECT * FROM fixed_tests WHERE status = ? ORDER BY created_at DESC");
+            $stmt->execute([$status]);
+        } else {
+            $stmt = $this->pdo->query("SELECT * FROM fixed_tests ORDER BY created_at DESC");
+        }
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get pending fixed tests that need retest (for API)
+     */
+    public function getPendingFixedTests($clientVersion = null) {
+        if ($clientVersion) {
+            $stmt = $this->pdo->prepare("SELECT * FROM fixed_tests WHERE status = 'pending_retest' AND client_version = ?");
+            $stmt->execute([$clientVersion]);
+        } else {
+            $stmt = $this->pdo->query("SELECT * FROM fixed_tests WHERE status = 'pending_retest'");
+        }
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Mark a fixed test as verified
+     */
+    public function verifyFixedTest($id) {
+        $stmt = $this->pdo->prepare("UPDATE fixed_tests SET status = 'verified', verified_at = NOW() WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Delete a fixed test entry
+     */
+    public function deleteFixedTest($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM fixed_tests WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Get a single fixed test
+     */
+    public function getFixedTest($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM fixed_tests WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get combined retest queue for API (both retest requests and fixed tests)
+     */
+    public function getRetestQueue($clientVersion = null) {
+        $queue = [];
+
+        // Add retest requests
+        foreach ($this->getPendingRetestsForClient($clientVersion) as $request) {
+            $queue[] = [
+                'type' => 'retest',
+                'id' => $request['id'],
+                'test_key' => $request['test_key'],
+                'client_version' => $request['client_version'],
+                'reason' => $request['reason'],
+                'notes' => $request['notes'] ?? '',
+                'report_id' => $request['report_id'] ?? null,
+                'report_revision' => $request['report_revision'] ?? null,
+                'latest_revision' => false,
+                'created_at' => $request['created_at']
+            ];
+        }
+
+        // Add fixed tests (these have latest_revision flag)
+        foreach ($this->getPendingFixedTests($clientVersion) as $fixed) {
+            $queue[] = [
+                'type' => 'fixed',
+                'id' => $fixed['id'],
+                'test_key' => $fixed['test_key'],
+                'client_version' => $fixed['client_version'],
+                'reason' => 'Test marked as fixed - please verify',
+                'commit_hash' => $fixed['commit_hash'],
+                'latest_revision' => true,
+                'created_at' => $fixed['created_at']
+            ];
+        }
+
+        // Sort by created_at descending
+        usort($queue, fn($a, $b) => strcmp($b['created_at'], $a['created_at']));
+
+        return $queue;
+    }
+
+    // =====================
+    // REPORT REVISIONS
+    // =====================
+
+    /**
+     * Get all revisions for a report
+     */
+    public function getReportRevisions($reportId) {
+        $stmt = $this->pdo->prepare("
+            SELECT * FROM report_revisions
+            WHERE report_id = ?
+            ORDER BY archived_at DESC
+        ");
+        $stmt->execute([$reportId]);
+        $revisions = $stmt->fetchAll();
+
+        // Parse JSON test_results
+        foreach ($revisions as &$revision) {
+            $revision['test_results'] = json_decode($revision['test_results'], true) ?? [];
+        }
+
+        return $revisions;
+    }
+
+    /**
+     * Get a single revision by ID
+     */
+    public function getRevision($revisionId) {
+        $stmt = $this->pdo->prepare("SELECT * FROM report_revisions WHERE id = ?");
+        $stmt->execute([$revisionId]);
+        $revision = $stmt->fetch();
+
+        if ($revision) {
+            $revision['test_results'] = json_decode($revision['test_results'], true) ?? [];
+        }
+
+        return $revision ?: null;
+    }
+
+    /**
+     * Get revision count for a report
+     */
+    public function getRevisionCount($reportId) {
+        $stmt = $this->pdo->prepare("SELECT COUNT(*) as count FROM report_revisions WHERE report_id = ?");
+        $stmt->execute([$reportId]);
+        return $stmt->fetch()['count'];
+    }
+
+    /**
+     * Get all revisions (for admin view)
+     */
+    public function getAllRevisions($limit = 50, $offset = 0) {
+        $stmt = $this->pdo->prepare("
+            SELECT * FROM report_revisions
+            ORDER BY archived_at DESC
+            LIMIT ? OFFSET ?
+        ");
+        $stmt->execute([$limit, $offset]);
+        $revisions = $stmt->fetchAll();
+
+        foreach ($revisions as &$revision) {
+            $revision['test_results'] = json_decode($revision['test_results'], true) ?? [];
+        }
+
+        return $revisions;
+    }
+
+    /**
+     * Count total revisions
+     */
+    public function countRevisions() {
+        $stmt = $this->pdo->query("SELECT COUNT(*) as count FROM report_revisions");
+        return $stmt->fetch()['count'];
+    }
+
+    /**
+     * Restore a revision as the current report
+     */
+    public function restoreRevision($revisionId) {
+        $revision = $this->getRevision($revisionId);
+        if (!$revision) return false;
+
+        $reportId = $revision['report_id'];
+        $currentReport = $this->getReport($reportId);
+        if (!$currentReport) return false;
+
+        // Archive current state before restoring
+        $this->archiveReportAsRevision($reportId);
+
+        // Restore the revision data to the main report
+        $stmt = $this->pdo->prepare("
+            UPDATE reports SET
+                commit_hash = ?,
+                submitted_at = ?,
+                raw_json = ?,
+                revision_count = revision_count + 1,
+                restored_from = ?,
+                restored_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->execute([
+            $revision['commit_hash'],
+            $revision['submitted_at'],
+            $revision['raw_json'],
+            $revisionId,
+            $reportId
+        ]);
+
+        // Delete current test results
+        $stmt = $this->pdo->prepare("DELETE FROM test_results WHERE report_id = ?");
+        $stmt->execute([$reportId]);
+
+        // Restore test results from revision
+        foreach ($revision['test_results'] as $result) {
+            $this->insertTestResult($reportId, $result['test_key'], $result['status'], $result['notes'] ?? '');
+        }
+
+        return true;
+    }
+
+    // =====================
+    // REPORT LOG FILES
+    // =====================
+
+    /**
+     * Insert a log file for a report
+     * Log data should be base64-encoded gzip compressed content
+     */
+    public function insertReportLog($reportId, $filename, $logDatetime, $sizeOriginal, $sizeCompressed, $logDataBase64) {
+        // Decode base64 to get the raw gzip binary data
+        $logData = base64_decode($logDataBase64);
+        if ($logData === false) {
+            return false;
+        }
+
+        $stmt = $this->pdo->prepare("
+            INSERT INTO report_logs (report_id, filename, log_datetime, size_original, size_compressed, log_data, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, NOW())
+        ");
+        return $stmt->execute([$reportId, $filename, $logDatetime, $sizeOriginal, $sizeCompressed, $logData]);
+    }
+
+    /**
+     * Get all log files for a report (without the actual data)
+     */
+    public function getReportLogs($reportId) {
+        $stmt = $this->pdo->prepare("
+            SELECT id, report_id, filename, log_datetime, size_original, size_compressed, created_at
+            FROM report_logs
+            WHERE report_id = ?
+            ORDER BY log_datetime DESC
+        ");
+        $stmt->execute([$reportId]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get a single log file (with data for download)
+     */
+    public function getReportLog($logId) {
+        $stmt = $this->pdo->prepare("SELECT * FROM report_logs WHERE id = ?");
+        $stmt->execute([$logId]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Delete all logs for a report
+     */
+    public function deleteReportLogs($reportId) {
+        $stmt = $this->pdo->prepare("DELETE FROM report_logs WHERE report_id = ?");
+        return $stmt->execute([$reportId]);
+    }
+
+    /**
+     * Delete a single log by ID
+     * Returns the report_id of the deleted log (for triggering revision), or null on failure
+     */
+    public function deleteReportLogById($logId) {
+        // First get the log to find its report_id
+        $log = $this->getReportLog($logId);
+        if (!$log) {
+            return null;
+        }
+
+        $reportId = $log['report_id'];
+        $stmt = $this->pdo->prepare("DELETE FROM report_logs WHERE id = ?");
+        if ($stmt->execute([$logId])) {
+            return $reportId;
+        }
+        return null;
+    }
+
+    /**
+     * Check if report has logs
+     */
+    public function hasReportLogs($reportId) {
+        $stmt = $this->pdo->prepare("SELECT COUNT(*) as count FROM report_logs WHERE report_id = ?");
+        $stmt->execute([$reportId]);
+        return $stmt->fetch()['count'] > 0;
+    }
+
+    // =====================
+    // COMMIT/REVISION STATS
+    // =====================
+
+    /**
+     * Get stats for each commit hash (repo revision)
+     */
+    public function getCommitStats() {
+        $stmt = $this->pdo->query("
+            SELECT
+                r.commit_hash,
+                COUNT(DISTINCT r.id) as report_count,
+                MIN(r.submitted_at) as first_report,
+                MAX(r.submitted_at) as last_report,
+                SUM(CASE WHEN tr.status = 'Working' THEN 1 ELSE 0 END) as working,
+                SUM(CASE WHEN tr.status = 'Semi-working' THEN 1 ELSE 0 END) as semi_working,
+                SUM(CASE WHEN tr.status = 'Not working' THEN 1 ELSE 0 END) as not_working,
+                SUM(CASE WHEN tr.status = 'N/A' THEN 1 ELSE 0 END) as na,
+                COUNT(tr.id) as total_tests
+            FROM reports r
+            LEFT JOIN test_results tr ON r.id = tr.report_id
+            WHERE r.commit_hash IS NOT NULL AND r.commit_hash != ''
+            GROUP BY r.commit_hash
+            ORDER BY last_report DESC
+        ");
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get reports for a specific commit hash
+     */
+    public function getReportsByCommit($commitHash) {
+        $stmt = $this->pdo->prepare("
+            SELECT * FROM reports
+            WHERE commit_hash = ?
+            ORDER BY submitted_at DESC
+        ");
+        $stmt->execute([$commitHash]);
+        return $stmt->fetchAll();
+    }
+
+    // =====================
+    // TEST CATEGORIES
+    // =====================
+
+    /**
+     * Get all test categories
+     */
+    public function getTestCategories() {
+        $stmt = $this->pdo->query("SELECT * FROM test_categories ORDER BY sort_order, name");
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get a single test category
+     */
+    public function getTestCategory($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM test_categories WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Create a test category
+     */
+    public function createTestCategory($name, $sortOrder = 0) {
+        $stmt = $this->pdo->prepare("INSERT INTO test_categories (name, sort_order) VALUES (?, ?)");
+        $stmt->execute([$name, $sortOrder]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Update a test category
+     */
+    public function updateTestCategory($id, $name, $sortOrder = null) {
+        if ($sortOrder !== null) {
+            $stmt = $this->pdo->prepare("UPDATE test_categories SET name = ?, sort_order = ? WHERE id = ?");
+            return $stmt->execute([$name, $sortOrder, $id]);
+        } else {
+            $stmt = $this->pdo->prepare("UPDATE test_categories SET name = ? WHERE id = ?");
+            return $stmt->execute([$name, $id]);
+        }
+    }
+
+    /**
+     * Delete a test category (sets test types to disabled with null category)
+     */
+    public function deleteTestCategory($id) {
+        // Disable tests in this category (foreign key will set to NULL)
+        $stmt = $this->pdo->prepare("UPDATE test_types SET is_enabled = 0 WHERE category_id = ?");
+        $stmt->execute([$id]);
+
+        // Delete the category
+        $stmt = $this->pdo->prepare("DELETE FROM test_categories WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Get max sort order for categories
+     */
+    public function getMaxCategorySortOrder() {
+        $stmt = $this->pdo->query("SELECT MAX(sort_order) as max_order FROM test_categories");
+        $row = $stmt->fetch();
+        return $row['max_order'] ?? 0;
+    }
+
+    // =====================
+    // TEST TYPES
+    // =====================
+
+    /**
+     * Get all test types
+     */
+    public function getTestTypes($enabledOnly = false) {
+        $where = $enabledOnly ? "WHERE tt.is_enabled = 1" : "";
+        $stmt = $this->pdo->query("
+            SELECT tt.*, tc.name as category_name
+            FROM test_types tt
+            LEFT JOIN test_categories tc ON tt.category_id = tc.id
+            $where
+            ORDER BY tt.sort_order, tt.test_key
+        ");
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get test types grouped by category
+     */
+    public function getTestTypesGrouped($enabledOnly = true) {
+        $types = $this->getTestTypes($enabledOnly);
+        $grouped = [];
+
+        foreach ($types as $type) {
+            $catName = $type['category_name'] ?? 'Uncategorized';
+            if (!isset($grouped[$catName])) {
+                $grouped[$catName] = [];
+            }
+            $grouped[$catName][$type['test_key']] = [
+                'id' => $type['id'],
+                'name' => $type['name'],
+                'expected' => $type['description'],
+                'category' => $catName,
+                'is_enabled' => $type['is_enabled']
+            ];
+        }
+
+        return $grouped;
+    }
+
+    /**
+     * Get a single test type
+     */
+    public function getTestType($id) {
+        $stmt = $this->pdo->prepare("
+            SELECT tt.*, tc.name as category_name
+            FROM test_types tt
+            LEFT JOIN test_categories tc ON tt.category_id = tc.id
+            WHERE tt.id = ?
+        ");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get a test type by key
+     */
+    public function getTestTypeByKey($testKey) {
+        $stmt = $this->pdo->prepare("
+            SELECT tt.*, tc.name as category_name
+            FROM test_types tt
+            LEFT JOIN test_categories tc ON tt.category_id = tc.id
+            WHERE tt.test_key = ?
+        ");
+        $stmt->execute([$testKey]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Create a test type
+     */
+    public function createTestType($testKey, $name, $description, $categoryId = null, $sortOrder = 0) {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO test_types (test_key, name, description, category_id, sort_order, is_enabled)
+            VALUES (?, ?, ?, ?, ?, 1)
+        ");
+        $stmt->execute([$testKey, $name, $description, $categoryId, $sortOrder]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Update a test type
+     */
+    public function updateTestType($id, $data) {
+        $updates = [];
+        $params = [];
+
+        if (isset($data['test_key'])) {
+            $updates[] = "test_key = ?";
+            $params[] = $data['test_key'];
+        }
+        if (isset($data['name'])) {
+            $updates[] = "name = ?";
+            $params[] = $data['name'];
+        }
+        if (isset($data['description'])) {
+            $updates[] = "description = ?";
+            $params[] = $data['description'];
+        }
+        if (array_key_exists('category_id', $data)) {
+            $updates[] = "category_id = ?";
+            $params[] = $data['category_id'];
+        }
+        if (isset($data['is_enabled'])) {
+            $updates[] = "is_enabled = ?";
+            $params[] = $data['is_enabled'];
+        }
+        if (isset($data['sort_order'])) {
+            $updates[] = "sort_order = ?";
+            $params[] = $data['sort_order'];
+        }
+
+        if (empty($updates)) {
+            return true;
+        }
+
+        $params[] = $id;
+        $stmt = $this->pdo->prepare("UPDATE test_types SET " . implode(", ", $updates) . " WHERE id = ?");
+        return $stmt->execute($params);
+    }
+
+    /**
+     * Delete a test type
+     */
+    public function deleteTestType($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM test_types WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Get max sort order for test types
+     */
+    public function getMaxTestTypeSortOrder() {
+        $stmt = $this->pdo->query("SELECT MAX(sort_order) as max_order FROM test_types");
+        $row = $stmt->fetch();
+        return $row['max_order'] ?? 0;
+    }
+
+    /**
+     * Check if test categories table exists and has data
+     */
+    public function hasTestCategoriesTable() {
+        try {
+            $stmt = $this->pdo->query("SELECT COUNT(*) as count FROM test_categories");
+            $row = $stmt->fetch();
+            return $row['count'] > 0;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    // =====================
+    // USER NOTIFICATIONS
+    // =====================
+
+    /**
+     * Create a notification for a user
+     */
+    public function createNotification($userId, $type, $title, $message, $notes = null, $reportId = null, $testKey = null, $clientVersion = null) {
+        $stmt = $this->pdo->prepare("
+            INSERT INTO user_notifications (user_id, type, report_id, test_key, client_version, title, message, notes, is_read, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NOW())
+        ");
+        $stmt->execute([$userId, $type, $reportId, $testKey, $clientVersion, $title, $message, $notes]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Create a retest notification for a tester (finds user by tester name from report)
+     */
+    public function createRetestNotification($reportId, $testKey, $clientVersion, $notes = '', $createdBy = '', $reportRevision = null) {
+        // Get the report to find the tester
+        $report = $this->getReport($reportId);
+        if (!$report) return false;
+
+        $testerName = $report['tester'];
+
+        // Find user by tester name
+        $user = $this->getUser($testerName);
+        if (!$user) return false;
+
+        $title = 'Retest Required';
+        $revisionInfo = $reportRevision !== null ? " (revision $reportRevision)" : "";
+        $message = "Test $testKey for version $clientVersion requires retesting$revisionInfo.";
+        if ($createdBy) {
+            $message .= " Requested by $createdBy.";
+        }
+
+        return $this->createNotification(
+            $user['id'],
+            'retest',
+            $title,
+            $message,
+            $notes,
+            $reportId,
+            $testKey,
+            $clientVersion
+        );
+    }
+
+    /**
+     * Get notifications for a user
+     */
+    public function getUserNotifications($userId, $unreadOnly = false, $limit = 50) {
+        $where = "user_id = ?";
+        if ($unreadOnly) {
+            $where .= " AND is_read = 0";
+        }
+
+        $stmt = $this->pdo->prepare("
+            SELECT * FROM user_notifications
+            WHERE $where
+            ORDER BY created_at DESC
+            LIMIT ?
+        ");
+        $stmt->execute([$userId, $limit]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get unread notification count for a user
+     */
+    public function getUnreadNotificationCount($userId) {
+        $stmt = $this->pdo->prepare("
+            SELECT COUNT(*) as count FROM user_notifications
+            WHERE user_id = ? AND is_read = 0
+        ");
+        $stmt->execute([$userId]);
+        return $stmt->fetch()['count'];
+    }
+
+    /**
+     * Mark a notification as read
+     */
+    public function markNotificationRead($id) {
+        $stmt = $this->pdo->prepare("UPDATE user_notifications SET is_read = 1, read_at = NOW() WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Mark all notifications as read for a user
+     */
+    public function markAllNotificationsRead($userId) {
+        $stmt = $this->pdo->prepare("UPDATE user_notifications SET is_read = 1, read_at = NOW() WHERE user_id = ? AND is_read = 0");
+        return $stmt->execute([$userId]);
+    }
+
+    /**
+     * Delete a notification
+     */
+    public function deleteNotification($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM user_notifications WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Get a single notification
+     */
+    public function getNotification($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM user_notifications WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get user by ID
+     */
+    public function getUserById($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM users WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Update last_modified timestamp for a report
+     */
+    public function touchReportModified($reportId) {
+        $stmt = $this->pdo->prepare("UPDATE reports SET last_modified = NOW() WHERE id = ?");
+        return $stmt->execute([$reportId]);
+    }
+
+    /**
+     * Get a revision by report ID and revision number
+     */
+    public function getRevisionByNumber($reportId, $revisionNumber) {
+        $stmt = $this->pdo->prepare("
+            SELECT * FROM report_revisions
+            WHERE report_id = ? AND revision_number = ?
+        ");
+        $stmt->execute([$reportId, $revisionNumber]);
+        $revision = $stmt->fetch();
+
+        if ($revision) {
+            $revision['test_results'] = json_decode($revision['test_results'], true) ?? [];
+            $revision['changes_diff'] = json_decode($revision['changes_diff'], true);
+        }
+
+        return $revision ?: null;
+    }
+
+    // =====================
+    // REPORT COMMENTS
+    // =====================
+
+    /**
+     * Ensure report_comments table exists
+     */
+    public function ensureCommentsTable() {
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS report_comments (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    report_id INT NOT NULL,
+                    user_id INT NOT NULL COMMENT 'Author of the comment',
+                    parent_comment_id INT DEFAULT NULL COMMENT 'For replies/quotes - references parent comment',
+                    content TEXT NOT NULL,
+                    quoted_text TEXT DEFAULT NULL COMMENT 'Quoted text from parent comment',
+                    is_edited TINYINT(1) NOT NULL DEFAULT 0,
+                    is_deleted TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Soft delete flag',
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT NULL,
+                    INDEX idx_report_id (report_id),
+                    INDEX idx_user_id (user_id),
+                    INDEX idx_parent_comment (parent_comment_id),
+                    INDEX idx_created_at (created_at),
+                    FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY (parent_comment_id) REFERENCES report_comments(id) ON DELETE SET NULL
+                ) ENGINE=InnoDB
+            ");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Add a comment to a report
+     */
+    public function addComment($reportId, $userId, $content, $parentCommentId = null, $quotedText = null) {
+        // Ensure table exists
+        $this->ensureCommentsTable();
+
+        // Verify report exists
+        $report = $this->getReport($reportId);
+        if (!$report) return null;
+
+        // Verify user exists
+        $user = $this->getUserById($userId);
+        if (!$user) return null;
+
+        // If parent comment specified, verify it exists and isn't deleted
+        if ($parentCommentId) {
+            $parent = $this->getComment($parentCommentId);
+            if (!$parent || $parent['is_deleted']) {
+                $parentCommentId = null;
+                $quotedText = null;
+            }
+        }
+
+        $stmt = $this->pdo->prepare("
+            INSERT INTO report_comments (report_id, user_id, parent_comment_id, content, quoted_text, created_at)
+            VALUES (?, ?, ?, ?, ?, NOW())
+        ");
+        $stmt->execute([$reportId, $userId, $parentCommentId, $content, $quotedText]);
+
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Get a single comment by ID
+     */
+    public function getComment($commentId) {
+        $stmt = $this->pdo->prepare("
+            SELECT c.*, u.username as author_name, u.role as author_role
+            FROM report_comments c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.id = ?
+        ");
+        $stmt->execute([$commentId]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get all comments for a report (with author info)
+     */
+    public function getReportComments($reportId) {
+        // Ensure table exists
+        $this->ensureCommentsTable();
+
+        $stmt = $this->pdo->prepare("
+            SELECT
+                c.*,
+                u.username as author_name,
+                u.role as author_role,
+                pc.content as parent_content,
+                pu.username as parent_author_name
+            FROM report_comments c
+            JOIN users u ON c.user_id = u.id
+            LEFT JOIN report_comments pc ON c.parent_comment_id = pc.id
+            LEFT JOIN users pu ON pc.user_id = pu.id
+            WHERE c.report_id = ? AND c.is_deleted = 0
+            ORDER BY c.created_at ASC
+        ");
+        $stmt->execute([$reportId]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get comment count for a report
+     */
+    public function getReportCommentCount($reportId) {
+        try {
+            $stmt = $this->pdo->prepare("
+                SELECT COUNT(*) as count FROM report_comments
+                WHERE report_id = ? AND is_deleted = 0
+            ");
+            $stmt->execute([$reportId]);
+            return $stmt->fetch()['count'];
+        } catch (PDOException $e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Edit a comment
+     */
+    public function editComment($commentId, $newContent, $userId) {
+        $comment = $this->getComment($commentId);
+        if (!$comment) {
+            return ['success' => false, 'error' => 'Comment not found'];
+        }
+
+        // Check if user owns the comment or is admin
+        $user = $this->getUserById($userId);
+        if (!$user) {
+            return ['success' => false, 'error' => 'User not found'];
+        }
+
+        if ($comment['user_id'] != $userId && $user['role'] !== 'admin') {
+            return ['success' => false, 'error' => 'Not authorized to edit this comment'];
+        }
+
+        $stmt = $this->pdo->prepare("
+            UPDATE report_comments
+            SET content = ?, updated_at = NOW(), is_edited = 1
+            WHERE id = ?
+        ");
+        $stmt->execute([$newContent, $commentId]);
+
+        return ['success' => true];
+    }
+
+    /**
+     * Delete a comment (soft delete)
+     */
+    public function deleteComment($commentId, $userId) {
+        $comment = $this->getComment($commentId);
+        if (!$comment) {
+            return ['success' => false, 'error' => 'Comment not found'];
+        }
+
+        // Check if user owns the comment or is admin
+        $user = $this->getUserById($userId);
+        if (!$user) {
+            return ['success' => false, 'error' => 'User not found'];
+        }
+
+        if ($comment['user_id'] != $userId && $user['role'] !== 'admin') {
+            return ['success' => false, 'error' => 'Not authorized to delete this comment'];
+        }
+
+        $stmt = $this->pdo->prepare("
+            UPDATE report_comments
+            SET is_deleted = 1, updated_at = NOW()
+            WHERE id = ?
+        ");
+        $stmt->execute([$commentId]);
+
+        return ['success' => true];
+    }
+
+    /**
+     * Check if user can edit/delete a comment
+     */
+    public function canManageComment($commentId, $userId) {
+        $comment = $this->getComment($commentId);
+        if (!$comment) return false;
+
+        $user = $this->getUserById($userId);
+        if (!$user) return false;
+
+        return ($comment['user_id'] == $userId || $user['role'] === 'admin');
+    }
+}
+
+// Helper function
+function getDb() {
+    return Database::getInstance();
+}
+
+/**
+ * Get test keys from database with fallback to static data
+ */
+function getTestKeys() {
+    try {
+        $db = Database::getInstance();
+        if ($db->hasTestCategoriesTable()) {
+            $types = $db->getTestTypes(true);
+            $keys = [];
+            foreach ($types as $type) {
+                $keys[$type['test_key']] = $type['name'];
+            }
+            return $keys;
+        }
+    } catch (Exception $e) {
+        // Fall through to static data
+    }
+
+    // Fallback to TEST_KEYS constant
+    $keys = [];
+    foreach (TEST_KEYS as $key => $test) {
+        $keys[$key] = $test['name'];
+    }
+    return $keys;
+}

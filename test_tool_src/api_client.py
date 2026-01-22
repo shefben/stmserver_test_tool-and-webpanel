@@ -1,0 +1,1170 @@
+#!/usr/bin/env python3
+"""
+Steam Emulator Test Panel - API Client
+
+A comprehensive Python client for communicating with the test panel API.
+Features:
+- Config file loading (JSON format)
+- Report submission
+- Retest queue checking (startup + periodic)
+- Callback support for retest notifications
+
+Usage:
+    # As a module
+    from api_client import TestPanelClient
+    client = TestPanelClient.from_config('config.json')
+    client.submit_report('session_results.json')
+    retests = client.get_retest_queue()
+
+    # As CLI
+    python api_client.py submit session_results.json
+    python api_client.py check-retests
+    python api_client.py --help
+"""
+
+import os
+import sys
+import json
+import time
+import gzip
+import base64
+import threading
+import logging
+from pathlib import Path
+from typing import Optional, Callable, List, Dict, Any, Union
+from dataclasses import dataclass, field
+from datetime import datetime
+
+try:
+    import requests
+except ImportError:
+    print("Error: 'requests' library is required. Install with: pip install requests")
+    sys.exit(1)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('TestPanelClient')
+
+
+@dataclass
+class Config:
+    """Configuration for the API client."""
+    api_url: str
+    api_key: str
+    check_interval: int = 600  # 10 minutes in seconds
+    auto_check_retests: bool = True
+    timeout: int = 30
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Config':
+        return cls(
+            api_url=data.get('api_url', '').rstrip('/'),
+            api_key=data.get('api_key', ''),
+            check_interval=data.get('check_interval', 600),
+            auto_check_retests=data.get('auto_check_retests', True),
+            timeout=data.get('timeout', 30)
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            'api_url': self.api_url,
+            'api_key': self.api_key,
+            'check_interval': self.check_interval,
+            'auto_check_retests': self.auto_check_retests,
+            'timeout': self.timeout
+        }
+
+    def validate(self) -> List[str]:
+        """Validate configuration and return list of errors."""
+        errors = []
+        if not self.api_url:
+            errors.append("api_url is required")
+        if not self.api_key:
+            errors.append("api_key is required")
+        if not self.api_key.startswith('sk_'):
+            errors.append("api_key should start with 'sk_'")
+        return errors
+
+
+@dataclass
+class TestType:
+    """Represents a test type from the API."""
+    test_key: str
+    name: str
+    description: str
+    category_id: Optional[int]
+    category_name: str
+    sort_order: int
+    is_enabled: bool
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'TestType':
+        return cls(
+            test_key=data.get('test_key', ''),
+            name=data.get('name', ''),
+            description=data.get('description', ''),
+            category_id=data.get('category_id'),
+            category_name=data.get('category_name', 'Uncategorized'),
+            sort_order=data.get('sort_order', 0),
+            is_enabled=data.get('is_enabled', True)
+        )
+
+
+@dataclass
+class TestCategory:
+    """Represents a test category from the API."""
+    id: int
+    name: str
+    sort_order: int
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'TestCategory':
+        return cls(
+            id=data.get('id', 0),
+            name=data.get('name', ''),
+            sort_order=data.get('sort_order', 0)
+        )
+
+
+@dataclass
+class TestsResult:
+    """Result of fetching tests from the API."""
+    success: bool
+    categories: List[TestCategory] = field(default_factory=list)
+    tests: List[TestType] = field(default_factory=list)
+    grouped: Dict[str, List[TestType]] = field(default_factory=dict)
+    error: Optional[str] = None
+
+
+@dataclass
+class RetestItem:
+    """Represents a retest queue item."""
+    type: str  # 'retest' or 'fixed'
+    id: int
+    test_key: str
+    test_name: str
+    client_version: str
+    reason: str
+    latest_revision: bool
+    commit_hash: Optional[str] = None
+    created_at: Optional[str] = None
+    notes: Optional[str] = None  # Admin notes explaining what to retest
+    report_id: Optional[int] = None  # Associated report ID
+    report_revision: Optional[int] = None  # Report revision when retest was requested
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'RetestItem':
+        return cls(
+            type=data.get('type', ''),
+            id=data.get('id', 0),
+            test_key=data.get('test_key', ''),
+            test_name=data.get('test_name', ''),
+            client_version=data.get('client_version', ''),
+            reason=data.get('reason', ''),
+            latest_revision=data.get('latest_revision', False),
+            commit_hash=data.get('commit_hash'),
+            created_at=data.get('created_at'),
+            notes=data.get('notes'),
+            report_id=data.get('report_id'),
+            report_revision=data.get('report_revision')
+        )
+
+
+@dataclass
+class ReportLog:
+    """Represents a log file attached to a report."""
+    id: int
+    filename: str
+    log_datetime: str
+    size_original: int
+    size_compressed: int
+    created_at: Optional[str] = None
+    data: Optional[bytes] = None  # Compressed data (when downloaded)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'ReportLog':
+        return cls(
+            id=data.get('id', 0),
+            filename=data.get('filename', ''),
+            log_datetime=data.get('log_datetime', ''),
+            size_original=data.get('size_original', 0),
+            size_compressed=data.get('size_compressed', 0),
+            created_at=data.get('created_at')
+        )
+
+
+@dataclass
+class SubmitResult:
+    """Result of a report submission."""
+    success: bool
+    report_id: Optional[int] = None
+    client_version: Optional[str] = None
+    tests_recorded: int = 0
+    logs_attached: int = 0
+    view_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass
+class Revision:
+    """Represents a Git revision/commit."""
+    sha: str
+    notes: str
+    files: dict  # {'added': [], 'removed': [], 'modified': []}
+    ts: int  # Unix timestamp
+    datetime: str  # Formatted datetime string
+
+    @classmethod
+    def from_dict(cls, sha: str, data: dict) -> 'Revision':
+        return cls(
+            sha=sha,
+            notes=data.get('notes', ''),
+            files=data.get('files', {'added': [], 'removed': [], 'modified': []}),
+            ts=data.get('ts', 0),
+            datetime=data.get('datetime', '')
+        )
+
+
+@dataclass
+class UserInfo:
+    """Represents authenticated user info from the API."""
+    success: bool
+    username: Optional[str] = None
+    revisions: Optional[List['Revision']] = None  # List of revisions, newest first
+    revisions_count: int = 0
+    error: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'UserInfo':
+        if data.get('success'):
+            user = data.get('user', {})
+            # Parse revisions from API response
+            revisions_data = data.get('revisions', {})
+            revisions = []
+            for sha, rev_data in revisions_data.items():
+                revisions.append(Revision.from_dict(sha, rev_data))
+            # Sort by timestamp, newest first
+            revisions.sort(key=lambda r: r.ts, reverse=True)
+            return cls(
+                success=True,
+                username=user.get('username'),
+                revisions=revisions,
+                revisions_count=data.get('revisions_count', len(revisions))
+            )
+        return cls(
+            success=False,
+            error=data.get('error', 'Unknown error')
+        )
+
+
+@dataclass
+class Notification:
+    """Represents a user notification."""
+    id: int
+    type: str  # 'retest', 'fixed', 'info'
+    report_id: Optional[int]
+    test_key: Optional[str]
+    client_version: Optional[str]
+    title: str
+    message: str
+    notes: Optional[str]
+    is_read: bool
+    created_at: str
+    read_at: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Notification':
+        return cls(
+            id=data.get('id', 0),
+            type=data.get('type', 'info'),
+            report_id=data.get('report_id'),
+            test_key=data.get('test_key'),
+            client_version=data.get('client_version'),
+            title=data.get('title', ''),
+            message=data.get('message', ''),
+            notes=data.get('notes'),
+            is_read=bool(data.get('is_read', False)),
+            created_at=data.get('created_at', ''),
+            read_at=data.get('read_at')
+        )
+
+
+@dataclass
+class NotificationsResult:
+    """Result of fetching notifications."""
+    success: bool
+    unread_count: int = 0
+    notifications: List[Notification] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+class TestPanelClient:
+    """
+    Client for the Steam Emulator Test Panel API.
+
+    Provides methods for:
+    - Submitting test reports
+    - Checking retest queue
+    - Periodic background checking for retests
+    """
+
+    DEFAULT_CONFIG_PATHS = [
+        'test_panel_config.json',
+        'config.json',
+        os.path.expanduser('~/.steam_test_panel.json'),
+        os.path.expanduser('~/test_panel_config.json'),
+    ]
+
+    def __init__(self, config: Config):
+        """
+        Initialize the client with a configuration.
+
+        Args:
+            config: Configuration object
+        """
+        self.config = config
+        self._check_thread: Optional[threading.Thread] = None
+        self._stop_checking = threading.Event()
+        self._retest_callbacks: List[Callable[[List[RetestItem]], None]] = []
+        self._last_retest_check: Optional[datetime] = None
+        self._cached_retests: List[RetestItem] = []
+
+        # Validate configuration
+        errors = config.validate()
+        if errors:
+            raise ValueError(f"Invalid configuration: {', '.join(errors)}")
+
+    @classmethod
+    def from_config_file(cls, path: str) -> 'TestPanelClient':
+        """
+        Create a client from a config file.
+
+        Args:
+            path: Path to JSON config file
+
+        Returns:
+            TestPanelClient instance
+        """
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        config = Config.from_dict(data)
+        return cls(config)
+
+    @classmethod
+    def from_config(cls, path: Optional[str] = None) -> 'TestPanelClient':
+        """
+        Create a client, searching for config in default locations if path not provided.
+
+        Args:
+            path: Optional path to config file
+
+        Returns:
+            TestPanelClient instance
+        """
+        if path:
+            return cls.from_config_file(path)
+
+        # Search default locations
+        for default_path in cls.DEFAULT_CONFIG_PATHS:
+            if os.path.isfile(default_path):
+                logger.info(f"Loading config from: {default_path}")
+                return cls.from_config_file(default_path)
+
+        raise FileNotFoundError(
+            f"Config file not found. Searched: {cls.DEFAULT_CONFIG_PATHS}. "
+            "Create a config file or provide the path explicitly."
+        )
+
+    @staticmethod
+    def create_config_template(path: str = 'test_panel_config.json') -> None:
+        """
+        Create a template config file.
+
+        Args:
+            path: Path where to save the template
+        """
+        template = {
+            'api_url': 'http://localhost/test_api',
+            'api_key': 'sk_your_api_key_here',
+            'check_interval': 600,
+            'auto_check_retests': True,
+            'timeout': 30
+        }
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(template, f, indent=2)
+        print(f"Config template created: {path}")
+        print("Edit the file with your API URL and key.")
+
+    def _get_headers(self) -> dict:
+        """Get headers for API requests."""
+        return {
+            'Content-Type': 'application/json',
+            'X-API-Key': self.config.api_key
+        }
+
+    def _make_request(self, method: str, endpoint: str, data: Optional[dict] = None,
+                      params: Optional[dict] = None) -> requests.Response:
+        """
+        Make an API request.
+
+        Args:
+            method: HTTP method (GET, POST, etc.)
+            endpoint: API endpoint path
+            data: Optional JSON data for POST requests
+            params: Optional query parameters
+
+        Returns:
+            Response object
+        """
+        url = f"{self.config.api_url}/{endpoint.lstrip('/')}"
+
+        kwargs = {
+            'headers': self._get_headers(),
+            'timeout': self.config.timeout,
+        }
+
+        if params:
+            kwargs['params'] = params
+        if data:
+            kwargs['json'] = data
+
+        response = requests.request(method, url, **kwargs)
+        return response
+
+    def submit_report(self, file_path: str, verbose: bool = False) -> SubmitResult:
+        """
+        Submit a test report to the API.
+
+        Args:
+            file_path: Path to session_results.json file
+            verbose: Print detailed output
+
+        Returns:
+            SubmitResult with submission details
+        """
+        # Validate file exists
+        if not os.path.exists(file_path):
+            return SubmitResult(success=False, error=f"File not found: {file_path}")
+
+        # Read and parse JSON file
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            return SubmitResult(success=False, error=f"Invalid JSON: {e}")
+        except IOError as e:
+            return SubmitResult(success=False, error=f"Could not read file: {e}")
+
+        if verbose:
+            logger.info(f"Loaded report file: {file_path}")
+            if 'meta' in data:
+                logger.info(f"  Tester: {data['meta'].get('tester', 'Unknown')}")
+            if 'results' in data:
+                versions = list(data['results'].keys())
+                logger.info(f"  Versions: {len(versions)}")
+
+        # Submit to API
+        try:
+            response = self._make_request('POST', '/api/submit.php', data=data)
+
+            try:
+                result = response.json()
+            except json.JSONDecodeError:
+                result = {'raw_response': response.text}
+
+            if response.status_code == 201:
+                # Handle multi-report response format
+                reports = result.get('reports', [])
+                if reports:
+                    first_report = reports[0]
+                    return SubmitResult(
+                        success=True,
+                        report_id=first_report.get('report_id'),
+                        client_version=first_report.get('client_version'),
+                        tests_recorded=first_report.get('tests_recorded', 0),
+                        logs_attached=first_report.get('logs_attached', 0),
+                        view_url=first_report.get('view_url')
+                    )
+                # Legacy single-report format
+                return SubmitResult(
+                    success=True,
+                    report_id=result.get('report_id'),
+                    client_version=result.get('client_version'),
+                    tests_recorded=result.get('tests_recorded', 0),
+                    logs_attached=result.get('logs_attached', 0),
+                    view_url=result.get('view_url')
+                )
+            else:
+                return SubmitResult(
+                    success=False,
+                    error=result.get('error', f"HTTP {response.status_code}")
+                )
+
+        except requests.exceptions.ConnectionError:
+            return SubmitResult(success=False, error=f"Could not connect to API")
+        except requests.exceptions.Timeout:
+            return SubmitResult(success=False, error="Request timed out")
+        except requests.exceptions.RequestException as e:
+            return SubmitResult(success=False, error=str(e))
+
+    def get_retest_queue(self, client_version: Optional[str] = None) -> List[RetestItem]:
+        """
+        Get the current retest queue from the API.
+
+        Args:
+            client_version: Optional filter by client version
+
+        Returns:
+            List of RetestItem objects
+        """
+        params = {}
+        if client_version:
+            params['client_version'] = client_version
+
+        try:
+            response = self._make_request('GET', '/api/retests.php', params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    items = [RetestItem.from_dict(item) for item in data.get('retest_queue', [])]
+                    self._cached_retests = items
+                    self._last_retest_check = datetime.now()
+                    return items
+
+            logger.warning(f"Failed to get retest queue: HTTP {response.status_code}")
+            return []
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching retest queue: {e}")
+            return []
+
+    def get_tests(self, enabled_only: bool = True) -> TestsResult:
+        """
+        Get test types and categories from the API.
+
+        Args:
+            enabled_only: If True, only return enabled tests
+
+        Returns:
+            TestsResult with tests grouped by category
+        """
+        params = {}
+        if not enabled_only:
+            params['all'] = '1'
+
+        try:
+            response = self._make_request('GET', '/api/tests.php', params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    categories = [TestCategory.from_dict(c) for c in data.get('categories', [])]
+                    tests = [TestType.from_dict(t) for t in data.get('tests', [])]
+
+                    # Build grouped dict with TestType objects
+                    grouped = {}
+                    for cat_name, test_list in data.get('grouped', {}).items():
+                        grouped[cat_name] = [TestType.from_dict(t) for t in test_list]
+
+                    return TestsResult(
+                        success=True,
+                        categories=categories,
+                        tests=tests,
+                        grouped=grouped
+                    )
+
+            logger.warning(f"Failed to get tests: HTTP {response.status_code}")
+            return TestsResult(success=False, error=f"HTTP {response.status_code}")
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching tests: {e}")
+            return TestsResult(success=False, error=str(e))
+
+    def get_user_info(self) -> UserInfo:
+        """
+        Get info about the authenticated user.
+
+        Returns:
+            UserInfo with username if successful
+        """
+        try:
+            response = self._make_request('GET', '/api/user.php')
+
+            if response.status_code == 200:
+                data = response.json()
+                return UserInfo.from_dict(data)
+
+            logger.warning(f"Failed to get user info: HTTP {response.status_code}")
+            return UserInfo(success=False, error=f"HTTP {response.status_code}")
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching user info: {e}")
+            return UserInfo(success=False, error=str(e))
+
+    def get_report_logs(self, report_id: int) -> List[ReportLog]:
+        """
+        Get list of log files attached to a report.
+
+        Args:
+            report_id: The report ID
+
+        Returns:
+            List of ReportLog objects (without data)
+        """
+        try:
+            response = self._make_request('GET', '/api/logs.php', params={'report_id': report_id})
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    return [ReportLog.from_dict(log) for log in data.get('logs', [])]
+
+            logger.warning(f"Failed to get report logs: HTTP {response.status_code}")
+            return []
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching report logs: {e}")
+            return []
+
+    def download_report_log(self, log_id: int, decompress: bool = True) -> Optional[Union[str, bytes]]:
+        """
+        Download a specific log file.
+
+        Args:
+            log_id: The log file ID
+            decompress: If True, decompress and return as string. If False, return raw compressed bytes.
+
+        Returns:
+            Log content as string (if decompress=True) or bytes (if decompress=False), or None on error
+        """
+        try:
+            response = self._make_request('GET', '/api/logs.php', params={'log_id': log_id})
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success') and 'log' in data:
+                    log_data = data['log']
+                    compressed_data = base64.b64decode(log_data.get('data', ''))
+
+                    if decompress:
+                        try:
+                            # Try zlib decompress first (what PHP gzcompress uses)
+                            import zlib
+                            decompressed = zlib.decompress(compressed_data)
+                            return decompressed.decode('utf-8', errors='replace')
+                        except zlib.error:
+                            # Try gzip decompress as fallback
+                            try:
+                                decompressed = gzip.decompress(compressed_data)
+                                return decompressed.decode('utf-8', errors='replace')
+                            except Exception:
+                                logger.error("Failed to decompress log data")
+                                return None
+                    else:
+                        return compressed_data
+
+            logger.warning(f"Failed to download log: HTTP {response.status_code}")
+            return None
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error downloading log: {e}")
+            return None
+
+    def save_report_log(self, log_id: int, output_path: str) -> bool:
+        """
+        Download and save a log file to disk.
+
+        Args:
+            log_id: The log file ID
+            output_path: Path to save the log file
+
+        Returns:
+            True if successful
+        """
+        content = self.download_report_log(log_id, decompress=True)
+        if content is not None:
+            try:
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                return True
+            except IOError as e:
+                logger.error(f"Failed to save log file: {e}")
+                return False
+        return False
+
+    def delete_report_log(self, log_id: int) -> bool:
+        """
+        Delete a log file from a report.
+
+        Args:
+            log_id: The log file ID to delete
+
+        Returns:
+            True if successful
+        """
+        try:
+            response = self._make_request('POST', '/api/logs.php', data={
+                'action': 'delete',
+                'log_id': log_id
+            })
+
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('success', False)
+
+            logger.warning(f"Failed to delete log: HTTP {response.status_code}")
+            return False
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error deleting log: {e}")
+            return False
+
+    def find_report_id(self, tester: str, client_version: str, test_type: str) -> Optional[int]:
+        """
+        Find the report ID for a given tester, client version, and test type.
+
+        Args:
+            tester: The tester's username
+            client_version: The client version ID
+            test_type: The test type (WAN or LAN)
+
+        Returns:
+            The report ID if found, None otherwise
+        """
+        try:
+            response = self._make_request('GET', '/api/reports.php', params={
+                'tester': tester,
+                'version': client_version,
+                'type': test_type,
+                'limit': 1
+            })
+
+            if response.status_code == 200:
+                data = response.json()
+                reports = data.get('reports', [])
+                if reports:
+                    return reports[0].get('id')
+
+            return None
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error finding report: {e}")
+            return None
+
+    @staticmethod
+    def compress_log_file(file_path: str) -> dict:
+        """
+        Compress a log file for inclusion in a report submission.
+
+        Args:
+            file_path: Path to the log file
+
+        Returns:
+            Dict with log metadata suitable for inclusion in attached_logs array
+        """
+        import zlib
+        from datetime import datetime
+
+        with open(file_path, 'rb') as f:
+            content = f.read()
+
+        size_original = len(content)
+        compressed = zlib.compress(content, 9)
+        size_compressed = len(compressed)
+
+        # Get file modification time
+        file_stat = os.stat(file_path)
+        file_datetime = datetime.fromtimestamp(file_stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+
+        return {
+            'filename': os.path.basename(file_path),
+            'datetime': file_datetime,
+            'size_original': size_original,
+            'size_compressed': size_compressed,
+            'data': base64.b64encode(compressed).decode('ascii')
+        }
+
+    def mark_retest_completed(self, item: RetestItem, new_status: Optional[str] = None) -> bool:
+        """
+        Mark a retest item as completed.
+
+        Args:
+            item: The retest item to mark as completed
+            new_status: For 'fixed' type, the new test status ('Working', etc.)
+
+        Returns:
+            True if successful
+        """
+        data = {
+            'type': item.type,
+            'id': item.id
+        }
+        if new_status:
+            data['new_status'] = new_status
+
+        try:
+            response = self._make_request('POST', '/api/retests.php', data=data)
+            result = response.json()
+            return result.get('success', False)
+        except Exception as e:
+            logger.error(f"Error marking retest completed: {e}")
+            return False
+
+    def get_notifications(self, unread_only: bool = False, limit: int = 50) -> NotificationsResult:
+        """
+        Get user notifications.
+
+        Args:
+            unread_only: If True, only return unread notifications
+            limit: Maximum number of notifications to return
+
+        Returns:
+            NotificationsResult with notifications list
+        """
+        params = {'limit': limit}
+        if unread_only:
+            params['unread'] = 'true'
+
+        try:
+            response = self._make_request('GET', '/api/notifications.php', params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    notifications = [Notification.from_dict(n) for n in data.get('notifications', [])]
+                    return NotificationsResult(
+                        success=True,
+                        unread_count=data.get('unread_count', 0),
+                        notifications=notifications
+                    )
+
+            logger.warning(f"Failed to get notifications: HTTP {response.status_code}")
+            return NotificationsResult(success=False, error=f"HTTP {response.status_code}")
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching notifications: {e}")
+            return NotificationsResult(success=False, error=str(e))
+
+    def mark_notification_read(self, notification_id: int) -> bool:
+        """
+        Mark a notification as read.
+
+        Args:
+            notification_id: The notification ID
+
+        Returns:
+            True if successful
+        """
+        try:
+            response = self._make_request('POST', '/api/notifications.php', data={
+                'action': 'mark_read',
+                'notification_id': notification_id
+            })
+            result = response.json()
+            return result.get('success', False)
+        except Exception as e:
+            logger.error(f"Error marking notification read: {e}")
+            return False
+
+    def mark_all_notifications_read(self) -> bool:
+        """
+        Mark all notifications as read.
+
+        Returns:
+            True if successful
+        """
+        try:
+            response = self._make_request('POST', '/api/notifications.php', data={
+                'action': 'mark_all_read'
+            })
+            result = response.json()
+            return result.get('success', False)
+        except Exception as e:
+            logger.error(f"Error marking all notifications read: {e}")
+            return False
+
+    def add_retest_callback(self, callback: Callable[[List[RetestItem]], None]) -> None:
+        """
+        Add a callback to be called when new retests are found.
+
+        Args:
+            callback: Function that takes a list of RetestItem objects
+        """
+        self._retest_callbacks.append(callback)
+
+    def remove_retest_callback(self, callback: Callable[[List[RetestItem]], None]) -> None:
+        """
+        Remove a previously added callback.
+
+        Args:
+            callback: The callback function to remove
+        """
+        if callback in self._retest_callbacks:
+            self._retest_callbacks.remove(callback)
+
+    def _notify_callbacks(self, items: List[RetestItem]) -> None:
+        """Notify all registered callbacks about new retests."""
+        for callback in self._retest_callbacks:
+            try:
+                callback(items)
+            except Exception as e:
+                logger.error(f"Error in retest callback: {e}")
+
+    def check_retests_now(self, client_version: Optional[str] = None) -> List[RetestItem]:
+        """
+        Check for retests immediately and notify callbacks if any found.
+
+        Args:
+            client_version: Optional filter by client version
+
+        Returns:
+            List of retest items
+        """
+        items = self.get_retest_queue(client_version)
+        if items:
+            self._notify_callbacks(items)
+        return items
+
+    def start_periodic_checking(self, client_version: Optional[str] = None) -> None:
+        """
+        Start periodic background checking for retests.
+
+        Args:
+            client_version: Optional filter by client version
+        """
+        if self._check_thread and self._check_thread.is_alive():
+            logger.warning("Periodic checking already running")
+            return
+
+        self._stop_checking.clear()
+
+        def check_loop():
+            logger.info(f"Starting periodic retest checking (interval: {self.config.check_interval}s)")
+
+            # Initial check
+            self.check_retests_now(client_version)
+
+            while not self._stop_checking.wait(self.config.check_interval):
+                logger.debug("Checking for retests...")
+                self.check_retests_now(client_version)
+
+            logger.info("Periodic checking stopped")
+
+        self._check_thread = threading.Thread(target=check_loop, daemon=True)
+        self._check_thread.start()
+
+    def stop_periodic_checking(self) -> None:
+        """Stop periodic background checking."""
+        self._stop_checking.set()
+        if self._check_thread:
+            self._check_thread.join(timeout=5)
+            self._check_thread = None
+
+    def get_cached_retests(self) -> List[RetestItem]:
+        """Get the last fetched retest queue without making a new request."""
+        return self._cached_retests
+
+    def get_last_check_time(self) -> Optional[datetime]:
+        """Get the time of the last retest check."""
+        return self._last_retest_check
+
+    def test_connection(self) -> bool:
+        """
+        Test the API connection.
+
+        Returns:
+            True if connection is successful
+        """
+        try:
+            response = self._make_request('GET', '/api/retests.php')
+            return response.status_code in (200, 401)  # 401 means connected but wrong key
+        except Exception:
+            return False
+
+
+def print_retests(items: List[RetestItem]) -> None:
+    """Print retest items in a formatted way."""
+    if not items:
+        print("No pending retests.")
+        return
+
+    print(f"\n{'='*60}")
+    print(f"RETEST QUEUE ({len(items)} items)")
+    print(f"{'='*60}")
+
+    for item in items:
+        print(f"\n[{item.type.upper()}] Test {item.test_key}: {item.test_name}")
+        print(f"  Version: {item.client_version}")
+        print(f"  Reason: {item.reason}")
+        if item.notes:
+            print(f"  Admin Notes: {item.notes}")
+        if item.report_id:
+            revision_info = f" (revision {item.report_revision})" if item.report_revision is not None else ""
+            print(f"  Report ID: {item.report_id}{revision_info}")
+        if item.latest_revision:
+            print(f"  ** Uses LATEST REVISION **")
+        if item.commit_hash:
+            print(f"  Fix commit: {item.commit_hash}")
+
+    print(f"\n{'='*60}\n")
+
+
+def main():
+    """Main CLI entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='Steam Emulator Test Panel API Client',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Commands:
+  submit FILE       Submit a test report
+  check-retests     Check for pending retests
+  test-connection   Test API connection
+  create-config     Create a template config file
+  daemon            Run as daemon checking for retests periodically
+
+Examples:
+  %(prog)s submit session_results.json
+  %(prog)s check-retests --version "secondblob.bin.2004-01-15"
+  %(prog)s daemon --interval 300
+  %(prog)s create-config --output my_config.json
+        """
+    )
+
+    parser.add_argument(
+        '-c', '--config',
+        help='Path to config file (default: searches standard locations)'
+    )
+
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='Verbose output'
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
+
+    # Submit command
+    submit_parser = subparsers.add_parser('submit', help='Submit a test report')
+    submit_parser.add_argument('file', help='Path to session_results.json')
+
+    # Check retests command
+    check_parser = subparsers.add_parser('check-retests', help='Check for pending retests')
+    check_parser.add_argument(
+        '--version', '-V',
+        help='Filter by client version'
+    )
+
+    # Test connection command
+    subparsers.add_parser('test-connection', help='Test API connection')
+
+    # Create config command
+    config_parser = subparsers.add_parser('create-config', help='Create template config file')
+    config_parser.add_argument(
+        '-o', '--output',
+        default='test_panel_config.json',
+        help='Output path (default: test_panel_config.json)'
+    )
+
+    # Daemon command
+    daemon_parser = subparsers.add_parser('daemon', help='Run as daemon checking retests')
+    daemon_parser.add_argument(
+        '--interval', '-i',
+        type=int,
+        default=600,
+        help='Check interval in seconds (default: 600)'
+    )
+    daemon_parser.add_argument(
+        '--version', '-V',
+        help='Filter by client version'
+    )
+
+    args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    # Handle create-config without needing existing config
+    if args.command == 'create-config':
+        TestPanelClient.create_config_template(args.output)
+        return 0
+
+    # All other commands need a client
+    if not args.command:
+        parser.print_help()
+        return 0
+
+    try:
+        client = TestPanelClient.from_config(args.config)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        print("\nRun 'python api_client.py create-config' to create a template.")
+        return 1
+    except ValueError as e:
+        print(f"Config error: {e}")
+        return 1
+
+    # Execute commands
+    if args.command == 'submit':
+        print(f"Submitting report: {args.file}")
+        result = client.submit_report(args.file, verbose=args.verbose)
+
+        if result.success:
+            print("\n✓ Report submitted successfully!")
+            print(f"  Report ID: {result.report_id}")
+            print(f"  Client Version: {result.client_version}")
+            print(f"  Tests Recorded: {result.tests_recorded}")
+            if result.view_url:
+                print(f"  View URL: {result.view_url}")
+            return 0
+        else:
+            print(f"\n✗ Submission failed: {result.error}")
+            return 1
+
+    elif args.command == 'check-retests':
+        print("Checking for pending retests...")
+        items = client.get_retest_queue(args.version)
+        print_retests(items)
+        return 0
+
+    elif args.command == 'test-connection':
+        print(f"Testing connection to: {client.config.api_url}")
+        if client.test_connection():
+            print("✓ Connection successful!")
+            return 0
+        else:
+            print("✗ Connection failed!")
+            return 1
+
+    elif args.command == 'daemon':
+        print(f"Starting daemon mode (checking every {args.interval}s)")
+        print("Press Ctrl+C to stop.\n")
+
+        # Override interval from command line
+        client.config.check_interval = args.interval
+
+        # Add callback to print retests
+        client.add_retest_callback(print_retests)
+
+        try:
+            client.start_periodic_checking(args.version)
+
+            # Keep main thread alive
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nStopping...")
+            client.stop_periodic_checking()
+
+        return 0
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

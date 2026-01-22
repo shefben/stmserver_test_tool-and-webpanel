@@ -1,0 +1,3 @@
+  RewriteEngine On
+  SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
+  RewriteRule .* - [E=HTTP_X_API_KEY:%{HTTP:X-API-KEY}]
