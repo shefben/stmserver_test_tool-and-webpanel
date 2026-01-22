@@ -912,69 +912,310 @@ $isUserAdmin = isAdmin();
 </style>
 
 <?php if (isAdmin()): ?>
+<!-- Retest Modal Dialog -->
+<div id="retest-modal" class="retest-modal-overlay" style="display: none;">
+    <div class="retest-modal">
+        <div class="retest-modal-header">
+            <h3>Request Retest</h3>
+            <button type="button" class="retest-modal-close" onclick="closeRetestModal()">&times;</button>
+        </div>
+        <div class="retest-modal-body">
+            <p class="retest-modal-info">
+                Flagging <strong id="retest-modal-test-key"></strong> for retest on version <strong id="retest-modal-version"></strong>
+            </p>
+            <div class="form-group">
+                <label for="retest-modal-notes">Notes <span class="required">*</span></label>
+                <textarea id="retest-modal-notes" placeholder="Explain what needs to be retested and why..." rows="4"></textarea>
+                <p id="retest-modal-error" class="retest-modal-error" style="display: none;">Notes are required - please explain what needs to be retested.</p>
+            </div>
+        </div>
+        <div class="retest-modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeRetestModal()">Cancel</button>
+            <button type="button" class="btn" id="retest-modal-submit" onclick="submitRetestRequest()">Flag for Retest</button>
+        </div>
+    </div>
+</div>
+
+<style>
+.retest-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.retest-modal {
+    background: var(--bg-card);
+    border-radius: 8px;
+    width: 90%;
+    max-width: 500px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    animation: modalSlideIn 0.2s ease-out;
+}
+
+@keyframes modalSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.retest-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.retest-modal-header h3 {
+    margin: 0;
+    color: var(--text);
+    font-size: 18px;
+}
+
+.retest-modal-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 24px;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+}
+
+.retest-modal-close:hover {
+    color: var(--text);
+}
+
+.retest-modal-body {
+    padding: 20px;
+}
+
+.retest-modal-info {
+    margin: 0 0 15px 0;
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+.retest-modal-body .form-group {
+    margin: 0;
+}
+
+.retest-modal-body label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+    color: var(--text);
+}
+
+.retest-modal-body label .required {
+    color: #c45050;
+}
+
+.retest-modal-body textarea {
+    width: 100%;
+    background: var(--bg-dark);
+    border: 1px solid var(--border-bright);
+    border-radius: 6px;
+    padding: 12px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 14px;
+    resize: vertical;
+    min-height: 100px;
+    transition: border-color 0.2s;
+}
+
+.retest-modal-body textarea:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.retest-modal-body textarea.error {
+    border-color: #c45050;
+}
+
+.retest-modal-error {
+    margin: 8px 0 0 0;
+    color: #c45050;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.retest-modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding: 15px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-dark);
+    border-radius: 0 0 8px 8px;
+}
+
+.retest-modal-footer .btn {
+    min-width: 120px;
+}
+
+.retest-modal-footer .btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+</style>
+
 <script>
+var currentRetestButton = null;
+var currentRetestTestKey = '';
+var currentRetestClientVersion = '';
+
 document.addEventListener('DOMContentLoaded', function() {
-    // Handle retest button clicks
+    // Handle retest button clicks - open modal
     document.querySelectorAll('.btn-retest').forEach(function(btn) {
         btn.addEventListener('click', function() {
-            var testKey = this.dataset.testKey;
-            var clientVersion = this.dataset.clientVersion;
-            var button = this;
-
-            if (!confirm('Flag test ' + testKey + ' for retest on version ' + clientVersion + '?')) {
-                return;
-            }
-
-            button.disabled = true;
-            button.textContent = '...';
-
-            fetch('api/retest_request.php', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    test_key: testKey,
-                    client_version: clientVersion
-                })
-            })
-            .then(function(response) { return response.json(); })
-            .then(function(data) {
-                if (data.success) {
-                    // Replace button with pending badge
-                    var badge = document.createElement('span');
-                    badge.className = 'retest-badge';
-                    badge.title = 'Retest already requested';
-                    badge.textContent = 'Pending';
-                    button.parentNode.replaceChild(badge, button);
-
-                    // Add visual indicator to the row
-                    var row = badge.closest('tr');
-                    row.classList.add('retest-pending');
-
-                    // Add indicator next to test key
-                    var keyCell = row.querySelector('.test-key-link');
-                    if (keyCell && !row.querySelector('.retest-indicator')) {
-                        var indicator = document.createElement('span');
-                        indicator.className = 'retest-indicator';
-                        indicator.title = 'Flagged for retest';
-                        indicator.innerHTML = '&#x21BB;';
-                        keyCell.parentNode.appendChild(indicator);
-                    }
-                } else {
-                    alert('Error: ' + (data.error || 'Unknown error'));
-                    button.disabled = false;
-                    button.textContent = 'Retest';
-                }
-            })
-            .catch(function(error) {
-                alert('Error: ' + error.message);
-                button.disabled = false;
-                button.textContent = 'Retest';
-            });
+            currentRetestButton = this;
+            currentRetestTestKey = this.dataset.testKey;
+            currentRetestClientVersion = this.dataset.clientVersion;
+            openRetestModal();
         });
     });
+
+    // Close modal on overlay click
+    document.getElementById('retest-modal').addEventListener('click', function(e) {
+        if (e.target === this) {
+            closeRetestModal();
+        }
+    });
+
+    // Close modal on Escape key
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') {
+            closeRetestModal();
+        }
+    });
+
+    // Clear error when typing
+    document.getElementById('retest-modal-notes').addEventListener('input', function() {
+        if (this.value.trim()) {
+            this.classList.remove('error');
+            document.getElementById('retest-modal-error').style.display = 'none';
+        }
+    });
 });
+
+function openRetestModal() {
+    document.getElementById('retest-modal-test-key').textContent = currentRetestTestKey;
+    document.getElementById('retest-modal-version').textContent = currentRetestClientVersion;
+    document.getElementById('retest-modal-notes').value = '';
+    document.getElementById('retest-modal-notes').classList.remove('error');
+    document.getElementById('retest-modal-error').style.display = 'none';
+    document.getElementById('retest-modal-submit').disabled = false;
+    document.getElementById('retest-modal-submit').textContent = 'Flag for Retest';
+    document.getElementById('retest-modal').style.display = 'flex';
+    document.getElementById('retest-modal-notes').focus();
+}
+
+function closeRetestModal() {
+    document.getElementById('retest-modal').style.display = 'none';
+    currentRetestButton = null;
+    currentRetestTestKey = '';
+    currentRetestClientVersion = '';
+}
+
+function submitRetestRequest() {
+    var notes = document.getElementById('retest-modal-notes').value.trim();
+    var notesTextarea = document.getElementById('retest-modal-notes');
+    var errorEl = document.getElementById('retest-modal-error');
+    var submitBtn = document.getElementById('retest-modal-submit');
+
+    // Validate notes
+    if (!notes) {
+        notesTextarea.classList.add('error');
+        errorEl.style.display = 'block';
+        notesTextarea.focus();
+        return;
+    }
+
+    // Disable button and show loading state
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Submitting...';
+
+    fetch('api/retest_request.php', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            test_key: currentRetestTestKey,
+            client_version: currentRetestClientVersion,
+            notes: notes,
+            report_id: <?= $reportId ?>
+        })
+    })
+    .then(function(response) { return response.json(); })
+    .then(function(data) {
+        if (data.success) {
+            // Close modal
+            closeRetestModal();
+
+            // Replace button with pending badge
+            if (currentRetestButton) {
+                var badge = document.createElement('span');
+                badge.className = 'retest-badge';
+                badge.title = 'Retest already requested';
+                badge.textContent = 'Pending';
+                currentRetestButton.parentNode.replaceChild(badge, currentRetestButton);
+
+                // Add visual indicator to the row
+                var row = badge.closest('tr');
+                row.classList.add('retest-pending');
+
+                // Add indicator next to test key
+                var keyCell = row.querySelector('.test-key-link');
+                if (keyCell && !row.querySelector('.retest-indicator')) {
+                    var indicator = document.createElement('span');
+                    indicator.className = 'retest-indicator';
+                    indicator.title = 'Flagged for retest: ' + notes;
+                    indicator.innerHTML = '&#x21BB;';
+                    keyCell.parentNode.appendChild(indicator);
+                }
+
+                // Add retest notes display to the notes cell
+                var notesCell = row.querySelector('.notes-cell');
+                if (notesCell) {
+                    var retestNotesDiv = document.createElement('div');
+                    retestNotesDiv.className = 'retest-notes';
+                    retestNotesDiv.innerHTML = '<span class="retest-notes-label">Retest notes:</span> ' + escapeHtmlForRetest(notes);
+                    notesCell.appendChild(retestNotesDiv);
+                }
+            }
+        } else {
+            alert('Error: ' + (data.error || 'Unknown error'));
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Flag for Retest';
+        }
+    })
+    .catch(function(error) {
+        alert('Error: ' + error.message);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Flag for Retest';
+    });
+}
+
+function escapeHtmlForRetest(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
 </script>
 <?php endif; ?>
 
