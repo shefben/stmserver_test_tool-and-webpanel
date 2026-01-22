@@ -14,6 +14,16 @@ $recentReports = $db->getReports(5);
 $problematicTests = $db->getProblematicTests(10);
 $versionTrend = $db->getVersionTrend();
 
+// Get recent regressions and progressions
+$recentRegressions = [];
+$recentProgressions = [];
+try {
+    $recentRegressions = $db->getRecentRegressions(5);
+    $recentProgressions = $db->getRecentProgressions(5);
+} catch (Exception $e) {
+    // Table may not exist or have the right structure yet
+}
+
 // Calculate percentages
 $totalTests = $stats['working'] + $stats['semi_working'] + $stats['not_working'];
 $workingPct = $totalTests > 0 ? round(($stats['working'] / $totalTests) * 100, 1) : 0;
@@ -138,6 +148,93 @@ $brokenPct = $totalTests > 0 ? round(($stats['not_working'] / $totalTests) * 100
         <?php endif; ?>
     </div>
 </div>
+
+<!-- Regressions & Progressions Row -->
+<?php if (!empty($recentRegressions) || !empty($recentProgressions)): ?>
+<div class="charts-grid">
+    <!-- Recent Regressions -->
+    <div class="card regression-card">
+        <h3 class="card-title" style="color: var(--status-broken);">
+            <span style="font-size: 18px;">📉</span> Recent Regressions
+        </h3>
+        <?php if (empty($recentRegressions)): ?>
+            <p style="color: var(--text-muted); text-align: center; padding: 20px;">
+                No regressions detected recently. Great work!
+            </p>
+        <?php else: ?>
+            <ul class="change-list">
+                <?php foreach ($recentRegressions as $reg): ?>
+                    <li class="change-item regression">
+                        <div class="change-icon">↓</div>
+                        <div class="change-details">
+                            <div class="change-test">
+                                <a href="?page=results&test_key=<?= urlencode($reg['test_key']) ?>">
+                                    <span class="test-key"><?= e($reg['test_key']) ?></span>
+                                    <?= e(getTestName($reg['test_key'])) ?>
+                                </a>
+                            </div>
+                            <div class="change-status">
+                                <span class="status-badge" style="background: var(--status-working);"><?= e($reg['old_status']) ?></span>
+                                →
+                                <span class="status-badge" style="background: var(--status-broken);"><?= e($reg['new_status']) ?></span>
+                            </div>
+                            <div class="change-meta">
+                                <a href="?page=report_detail&id=<?= $reg['report_id'] ?>"><?= e(truncate($reg['client_version'], 30)) ?></a>
+                                by <?= e($reg['tester']) ?>
+                                • <?= formatRelativeTime($reg['archived_at']) ?>
+                            </div>
+                        </div>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+            <div style="text-align: center; margin-top: 10px;">
+                <a href="?page=compare_versions" class="btn btn-sm btn-secondary">Compare Versions</a>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- Recent Progressions -->
+    <div class="card progression-card">
+        <h3 class="card-title" style="color: var(--status-working);">
+            <span style="font-size: 18px;">📈</span> Recent Progressions
+        </h3>
+        <?php if (empty($recentProgressions)): ?>
+            <p style="color: var(--text-muted); text-align: center; padding: 20px;">
+                No progressions detected recently.
+            </p>
+        <?php else: ?>
+            <ul class="change-list">
+                <?php foreach ($recentProgressions as $prog): ?>
+                    <li class="change-item progression">
+                        <div class="change-icon">↑</div>
+                        <div class="change-details">
+                            <div class="change-test">
+                                <a href="?page=results&test_key=<?= urlencode($prog['test_key']) ?>">
+                                    <span class="test-key"><?= e($prog['test_key']) ?></span>
+                                    <?= e(getTestName($prog['test_key'])) ?>
+                                </a>
+                            </div>
+                            <div class="change-status">
+                                <span class="status-badge" style="background: var(--status-broken);"><?= e($prog['old_status']) ?></span>
+                                →
+                                <span class="status-badge" style="background: var(--status-working);"><?= e($prog['new_status']) ?></span>
+                            </div>
+                            <div class="change-meta">
+                                <a href="?page=report_detail&id=<?= $prog['report_id'] ?>"><?= e(truncate($prog['client_version'], 30)) ?></a>
+                                by <?= e($prog['tester']) ?>
+                                • <?= formatRelativeTime($prog['archived_at']) ?>
+                            </div>
+                        </div>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+            <div style="text-align: center; margin-top: 10px;">
+                <a href="?page=compare_versions" class="btn btn-sm btn-secondary">Compare Versions</a>
+            </div>
+        <?php endif; ?>
+    </div>
+</div>
+<?php endif; ?>
 
 <!-- Legend - Clickable -->
 <div class="legend">
@@ -289,6 +386,113 @@ $brokenPct = $totalTests > 0 ? round(($stats['not_working'] / $totalTests) * 100
 .legend-item.clickable:hover {
     background: var(--bg-accent);
     color: var(--text);
+}
+
+/* Regression/Progression Cards */
+.regression-card, .progression-card {
+    min-height: 200px;
+}
+
+.change-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.change-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px;
+    margin-bottom: 8px;
+    background: var(--bg-accent);
+    border-radius: 6px;
+    border-left: 3px solid transparent;
+    transition: all 0.2s;
+}
+
+.change-item:hover {
+    transform: translateX(3px);
+}
+
+.change-item.regression {
+    border-left-color: var(--status-broken);
+}
+
+.change-item.progression {
+    border-left-color: var(--status-working);
+}
+
+.change-icon {
+    font-size: 18px;
+    font-weight: bold;
+    width: 24px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.change-item.regression .change-icon {
+    color: var(--status-broken);
+}
+
+.change-item.progression .change-icon {
+    color: var(--status-working);
+}
+
+.change-details {
+    flex: 1;
+    min-width: 0;
+}
+
+.change-test {
+    font-weight: 500;
+    margin-bottom: 4px;
+}
+
+.change-test a {
+    color: var(--text);
+    text-decoration: none;
+}
+
+.change-test a:hover {
+    color: var(--primary);
+}
+
+.change-test .test-key {
+    font-family: monospace;
+    font-weight: bold;
+    color: var(--primary);
+    margin-right: 6px;
+}
+
+.change-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+
+.status-badge {
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #fff;
+}
+
+.change-meta {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.change-meta a {
+    color: var(--text-muted);
+    text-decoration: none;
+}
+
+.change-meta a:hover {
+    color: var(--primary);
 }
 </style>
 

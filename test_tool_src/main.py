@@ -16,9 +16,9 @@ from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QCheckBox, QStackedWidget, QListWidget,
                              QListWidgetItem, QHBoxLayout, QTextEdit, QMessageBox, QScrollArea, QFrame,
-                             QButtonGroup, QRadioButton, QDialog, QGroupBox, QComboBox)
-from PyQt5.QtCore import QDate, QUrl
-from PyQt5.QtGui import QPixmap, QImage, QDesktopServices, QTextCursor, QColor
+                             QButtonGroup, QRadioButton, QDialog, QGroupBox, QComboBox, QShortcut)
+from PyQt5.QtCore import QDate, QUrl, Qt
+from PyQt5.QtGui import QPixmap, QImage, QDesktopServices, QTextCursor, QColor, QKeySequence
 from versions import VERSIONS
 
 # Try to import panel integration (optional - only if configured)
@@ -31,6 +31,71 @@ except ImportError:
 
     def normalize_api_url(api_url):
         return (api_url or '').strip()
+
+# Try to import version-related dataclasses from api_client
+try:
+    from api_client import ClientVersion, VersionNotification, VersionsResult
+    API_CLIENT_AVAILABLE = True
+except ImportError:
+    API_CLIENT_AVAILABLE = False
+    ClientVersion = None
+    VersionNotification = None
+    VersionsResult = None
+
+# API-loaded versions list (populated from API when available)
+# Format matches the VERSIONS list: list of dicts with id, packages, steam_date, steam_time, skip_tests
+API_VERSIONS = None  # None means not loaded; empty list means loaded but empty
+
+
+def get_active_versions():
+    """Get the currently active versions list (API versions if loaded, else fallback)."""
+    global API_VERSIONS
+    if API_VERSIONS is not None and len(API_VERSIONS) > 0:
+        return API_VERSIONS
+    return VERSIONS
+
+
+def get_version_notifications_for_display(version_id, commit_hash=None):
+    """Get notifications for a version formatted for display.
+
+    Returns a list of notification dicts with 'name', 'message', 'created_at' keys,
+    sorted oldest first for stacking (oldest at bottom, newest at top).
+    """
+    global API_VERSIONS
+    if API_VERSIONS is None:
+        return []
+
+    # Find the version in API_VERSIONS
+    version = next((v for v in API_VERSIONS if v.get('id') == version_id), None)
+    if not version:
+        return []
+
+    notifications = version.get('notifications', [])
+    if not notifications:
+        return []
+
+    # Filter by commit hash if provided
+    result = []
+    for n in notifications:
+        if isinstance(n, dict):
+            n_commit = n.get('commit_hash')
+        else:
+            n_commit = getattr(n, 'commit_hash', None)
+
+        # Include if no commit hash filter on notification, or if it matches
+        if not n_commit or (commit_hash and n_commit == commit_hash):
+            if isinstance(n, dict):
+                result.append(n)
+            else:
+                result.append({
+                    'id': n.id,
+                    'name': n.name,
+                    'message': n.message,
+                    'commit_hash': n.commit_hash,
+                    'created_at': n.created_at
+                })
+
+    return result
 
 
 # QTextEdit subclass that handles pasting images from the clipboard and
@@ -701,7 +766,7 @@ class VersionPage(QWidget):
             except Exception:
                 pass
 
-        for v in VERSIONS:
+        for v in get_active_versions():
             vid = v['id']
             # Calculate completion percentage
             skip = set(v.get('skip_tests', []))
@@ -820,7 +885,7 @@ class VersionPage(QWidget):
         vid = item.data(QtCore.Qt.UserRole)
         if not vid:
             vid = item.text()  # Fallback to text if no data
-        v = next((x for x in VERSIONS if x['id'] == vid), None)
+        v = next((x for x in get_active_versions() if x['id'] == vid), None)
         if v:
             # modify emulator.ini
             meta = self.controller.intro.get_metadata()
@@ -1003,10 +1068,110 @@ class AttachmentsDialog(QDialog):
             QMessageBox.warning(self, "Error", f"Failed to delete attachment: {e}")
 
 
+class VersionNotificationsDialog(QDialog):
+    """Dialog for displaying version notifications/known issues when starting tests."""
+
+    def __init__(self, parent=None, version_id=None, notifications=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Notifications - {version_id}")
+        self.setMinimumWidth(500)
+        self.setMaximumWidth(700)
+        self.setup_ui(version_id, notifications or [])
+
+    def setup_ui(self, version_id, notifications):
+        layout = QVBoxLayout()
+
+        # Header
+        header = QLabel(f"<h3>Known Issues / Notes for {version_id}</h3>")
+        header.setStyleSheet("color: #c0392b;")
+        layout.addWidget(header)
+
+        info = QLabel(f"{len(notifications)} notification(s) for this version:")
+        layout.addWidget(info)
+
+        # Scroll area for notifications
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(200)
+        scroll.setMaximumHeight(400)
+
+        content = QWidget()
+        content_layout = QVBoxLayout()
+        content_layout.setSpacing(10)
+
+        # Display notifications stacked (oldest at bottom, newest at top)
+        # The list from API is oldest first, so we reverse it
+        for n in reversed(notifications):
+            notif_frame = QFrame()
+            notif_frame.setFrameStyle(QFrame.Box | QFrame.Raised)
+            notif_frame.setStyleSheet("""
+                QFrame {
+                    border: 2px solid #e74c3c;
+                    border-radius: 5px;
+                    background-color: #fdf2f2;
+                    padding: 5px;
+                }
+            """)
+            notif_layout = QVBoxLayout()
+
+            # Notification name (bold)
+            name_label = QLabel(f"<b>{n.get('name', 'Untitled')}</b>")
+            notif_layout.addWidget(name_label)
+
+            # Message content - support basic HTML
+            message = n.get('message', '')
+            # Convert BBCode-style formatting if present
+            message = message.replace('[b]', '<b>').replace('[/b]', '</b>')
+            message = message.replace('[i]', '<i>').replace('[/i]', '</i>')
+            message = message.replace('[u]', '<u>').replace('[/u]', '</u>')
+            message = message.replace('\n', '<br>')
+
+            msg_label = QLabel(message)
+            msg_label.setWordWrap(True)
+            msg_label.setTextFormat(QtCore.Qt.RichText)
+            msg_label.setOpenExternalLinks(True)
+            notif_layout.addWidget(msg_label)
+
+            # Metadata line (commit hash and date)
+            meta_parts = []
+            if n.get('commit_hash'):
+                meta_parts.append(f"Commit: {n['commit_hash'][:8]}")
+            if n.get('created_at'):
+                meta_parts.append(f"Added: {n['created_at']}")
+            if n.get('created_by'):
+                meta_parts.append(f"By: {n['created_by']}")
+            if meta_parts:
+                meta_label = QLabel(f"<small><i>{' | '.join(meta_parts)}</i></small>")
+                meta_label.setStyleSheet("color: #666;")
+                notif_layout.addWidget(meta_label)
+
+            notif_frame.setLayout(notif_layout)
+            content_layout.addWidget(notif_frame)
+
+        content_layout.addStretch()
+        content.setLayout(content_layout)
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+
+        # OK button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        ok_btn = QPushButton("Continue to Tests")
+        ok_btn.setStyleSheet("background-color:#27ae60;color:white;padding:8px 20px;")
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(ok_btn)
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+        self.adjustSize()
+
+
 class TestPage(QWidget):
     def __init__(self, parent=None, controller=None):
         super().__init__(parent)
         self.controller = controller
+        self.current_test_index = 0  # Track focused test for keyboard navigation
+        self.test_frames = []  # Store references to test frames for highlighting
         layout = QVBoxLayout()
         self.header = QLabel("")
         layout.addWidget(self.header)
@@ -1086,6 +1251,8 @@ class TestPage(QWidget):
             if w:
                 w.setParent(None)
         self.entries = []
+        self.test_frames = []  # Reset frame references
+        self.current_test_index = 0  # Reset current test index
         skip = set(version.get('skip_tests', []))
         for tnum, tname, tdesc in TESTS:
             if tnum in skip:
@@ -1145,7 +1312,9 @@ class TestPage(QWidget):
             fl.addWidget(status_widget, 1)
             fl.addWidget(note_container, 3)
             frame.setLayout(fl)
+            frame.setProperty('is_retest', tnum in retest_test_keys)  # Store retest status
             self.form.addWidget(frame)
+            self.test_frames.append(frame)  # Store frame reference for highlighting
             self.entries.append((tnum, group, notes))
         self.form.addStretch()
         # populate if existing
@@ -1339,6 +1508,84 @@ class TestPage(QWidget):
         self.controller.save_session()
         self.controller.show_versions()
 
+    # ==================== Keyboard Navigation Methods ====================
+
+    def highlight_current_test(self):
+        """Highlight the currently focused test and scroll to it."""
+        if not self.test_frames:
+            return
+
+        # Clamp index to valid range
+        if self.current_test_index < 0:
+            self.current_test_index = 0
+        if self.current_test_index >= len(self.test_frames):
+            self.current_test_index = len(self.test_frames) - 1
+
+        # Update all frame styles
+        for i, frame in enumerate(self.test_frames):
+            is_retest = frame.property('is_retest')
+            if i == self.current_test_index:
+                # Focused test - blue highlight
+                frame.setStyleSheet("background-color: #e3f2fd; border: 2px solid #2196f3; border-radius: 4px;")
+            elif is_retest:
+                # Retest needed - red highlight
+                frame.setStyleSheet("background-color: #fff5f5; border: 1px solid #e74c3c; border-radius: 4px;")
+            else:
+                # Normal test - no highlight
+                frame.setStyleSheet("")
+
+        # Scroll to the focused test
+        if self.current_test_index < len(self.test_frames):
+            frame = self.test_frames[self.current_test_index]
+            self.scroll.ensureWidgetVisible(frame, 50, 50)
+
+    def next_test(self):
+        """Move focus to the next test."""
+        if not self.entries:
+            return
+        if self.current_test_index < len(self.entries) - 1:
+            self.current_test_index += 1
+            self.highlight_current_test()
+
+    def prev_test(self):
+        """Move focus to the previous test."""
+        if not self.entries:
+            return
+        if self.current_test_index > 0:
+            self.current_test_index -= 1
+            self.highlight_current_test()
+
+    def set_current_test_status(self, status_index):
+        """Set the status of the currently focused test.
+
+        Args:
+            status_index: 1=Working, 2=Semi-working, 3=Not working, 4=N/A
+        """
+        if not self.entries or self.current_test_index >= len(self.entries):
+            return
+
+        # Map 1-4 to STATUS_OPTIONS[1:] (skipping empty string at index 0)
+        # STATUS_OPTIONS = ["", "Working", "Semi-working", "Not working", "N/A"]
+        if status_index < 1 or status_index > 4:
+            return
+
+        tnum, group, notes = self.entries[self.current_test_index]
+        buttons = group.buttons()
+
+        # buttons correspond to STATUS_OPTIONS[1:], so index 0 = Working, 1 = Semi-working, etc.
+        target_index = status_index - 1
+        if target_index < len(buttons):
+            buttons[target_index].setChecked(True)
+
+    def focus_current_notes(self):
+        """Focus the notes field of the currently focused test."""
+        if not self.entries or self.current_test_index >= len(self.entries):
+            return
+
+        tnum, group, notes = self.entries[self.current_test_index]
+        notes.setFocus()
+
+
 class Controller:
     # Path to settings INI file (next to this script)
     SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_tool_settings.ini')
@@ -1409,6 +1656,9 @@ class Controller:
         if self.panel and self.panel.is_configured:
             # Load tests from API when panel is configured
             self._load_tests_from_api()
+
+            # Load client versions from API (includes notifications)
+            self._load_versions_from_api()
 
             # Show offline mode warning if API is not reachable
             if self.offline_mode:
@@ -1562,6 +1812,70 @@ class Controller:
         """Get the current tests list (from API or fallback)."""
         return TESTS
 
+    def _load_versions_from_api(self):
+        """Load client versions from the API and update the global API_VERSIONS list.
+
+        If the API is configured but not reachable, uses fallback VERSIONS from file.
+        """
+        global API_VERSIONS
+        if not self.panel or not self.panel.is_configured:
+            print("Panel not configured, using fallback versions from file")
+            API_VERSIONS = None  # Will use VERSIONS from versions.py
+            return False
+
+        # Connection should already be tested by _load_tests_from_api
+        if self.offline_mode:
+            print("Offline mode, using fallback versions from file")
+            API_VERSIONS = None
+            return False
+
+        try:
+            # Get versions with notifications included
+            result = self.panel.get_versions(enabled_only=True, include_notifications=True)
+            if result and result.success and result.versions:
+                # Convert API ClientVersion objects to the same format as VERSIONS
+                new_versions = []
+                for v in result.versions:
+                    version_dict = {
+                        'id': v.id,
+                        'packages': v.packages or [],
+                        'steam_date': v.steam_date,
+                        'steam_time': v.steam_time,
+                        'skip_tests': v.skip_tests or [],
+                        'display_name': v.display_name,
+                        'notifications': []
+                    }
+                    # Add notifications
+                    if v.notifications:
+                        for n in v.notifications:
+                            version_dict['notifications'].append({
+                                'id': n.id,
+                                'name': n.name,
+                                'message': n.message,
+                                'commit_hash': n.commit_hash,
+                                'created_at': n.created_at
+                            })
+                    new_versions.append(version_dict)
+
+                API_VERSIONS = new_versions
+                print(f"Loaded {len(API_VERSIONS)} client versions from API")
+
+                # Count total notifications
+                total_notifs = sum(len(v.get('notifications', [])) for v in API_VERSIONS)
+                if total_notifs > 0:
+                    print(f"  (includes {total_notifs} version notifications)")
+
+                return True
+            else:
+                error = result.error if result else "Unknown error"
+                print(f"Failed to load versions from API: {error}, using fallback versions")
+                API_VERSIONS = None
+                return False
+        except Exception as e:
+            print(f"Error loading versions from API: {e}, using fallback versions")
+            API_VERSIONS = None
+            return False
+
     def _show_offline_mode_dialog(self):
         """Show a dialog informing the user that the tool is in offline mode."""
         msg = QMessageBox(self.window)
@@ -1653,6 +1967,16 @@ class Controller:
                 f"Failed to upload report:\n\n{message}")
 
     def show_tests_for(self, version):
+        # Check for notifications for this version before showing tests
+        version_id = version['id']
+        commit_hash = self.intro.get_metadata().get('commit')
+        notifications = get_version_notifications_for_display(version_id, commit_hash)
+
+        if notifications:
+            # Show notifications dialog
+            dialog = VersionNotificationsDialog(self.window, version_id, notifications)
+            dialog.exec_()  # Wait for user to acknowledge
+
         self.tests.load_tests(version)
         # start/resume timing for this version
         self.start_timer(version['id'])
@@ -1762,7 +2086,7 @@ class Controller:
             # This maps version IDs to their Steam/SteamUI package versions
             try:
                 version_packages = {}
-                for v in VERSIONS:
+                for v in get_active_versions():
                     vid = v['id']
                     packages = v.get('packages', [])
                     steam_ver = None
@@ -1898,7 +2222,7 @@ class Controller:
 
         # compute total time across tested versions (include running timer if active)
         total_all = 0
-        for v in VERSIONS:
+        for v in get_active_versions():
             vid = v['id']
             if vid not in tested_ids:
                 continue
@@ -1995,7 +2319,7 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
             header_cells.append(f'<th style="white-space:nowrap;">{label}</th>')
         matrix.append('<tr>' + ''.join(header_cells) + '</tr>')
 
-        for v in VERSIONS:
+        for v in get_active_versions():
             vid = v['id']
             if vid not in tested_ids:
                 continue
@@ -2044,7 +2368,7 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
                     "nodes.forEach(function(d){d.open=open;});"
                     "}"
                     "</script>")
-        for v in VERSIONS:
+        for v in get_active_versions():
             vid = v['id']
             if vid not in tested_ids:
                 continue
@@ -2079,7 +2403,256 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
         html.append('</body></html>')
         return '\n'.join(html)
 
+    def _setup_keyboard_shortcuts(self):
+        """Set up global keyboard shortcuts for the application."""
+        # Navigation shortcuts
+        # Ctrl+1: Go to Intro page
+        shortcut_intro = QShortcut(QKeySequence("Ctrl+1"), self.window)
+        shortcut_intro.activated.connect(lambda: self.stack.setCurrentWidget(self.intro))
+
+        # Ctrl+2: Go to Versions page
+        shortcut_versions = QShortcut(QKeySequence("Ctrl+2"), self.window)
+        shortcut_versions.activated.connect(self.show_versions)
+
+        # Ctrl+3: Go to Tests page (if a version is selected)
+        shortcut_tests = QShortcut(QKeySequence("Ctrl+3"), self.window)
+        shortcut_tests.activated.connect(lambda: self.stack.setCurrentWidget(self.tests) if self.current_version else None)
+
+        # Ctrl+S: Save session
+        shortcut_save = QShortcut(QKeySequence("Ctrl+S"), self.window)
+        shortcut_save.activated.connect(self._shortcut_save)
+
+        # Ctrl+E: Export report
+        shortcut_export = QShortcut(QKeySequence("Ctrl+E"), self.window)
+        shortcut_export.activated.connect(self.export_report)
+
+        # Ctrl+U: Upload to panel
+        shortcut_upload = QShortcut(QKeySequence("Ctrl+U"), self.window)
+        shortcut_upload.activated.connect(self._shortcut_upload)
+
+        # Ctrl+R: Reload session
+        shortcut_reload = QShortcut(QKeySequence("Ctrl+R"), self.window)
+        shortcut_reload.activated.connect(self.load_session)
+
+        # Ctrl+T: Check retests
+        shortcut_retests = QShortcut(QKeySequence("Ctrl+T"), self.window)
+        shortcut_retests.activated.connect(self._shortcut_check_retests)
+
+        # F5: Reload/refresh current view
+        shortcut_refresh = QShortcut(QKeySequence("F5"), self.window)
+        shortcut_refresh.activated.connect(self._shortcut_refresh)
+
+        # Ctrl+F: Finish test (when on tests page)
+        shortcut_finish = QShortcut(QKeySequence("Ctrl+F"), self.window)
+        shortcut_finish.activated.connect(self._shortcut_finish_test)
+
+        # Escape: Go back / cancel
+        shortcut_back = QShortcut(QKeySequence("Escape"), self.window)
+        shortcut_back.activated.connect(self._shortcut_back)
+
+        # F1: Show keyboard shortcuts help
+        shortcut_help = QShortcut(QKeySequence("F1"), self.window)
+        shortcut_help.activated.connect(self._show_shortcuts_help)
+
+        # Ctrl+L: Attach log files (when on tests page)
+        shortcut_attach = QShortcut(QKeySequence("Ctrl+L"), self.window)
+        shortcut_attach.activated.connect(self._shortcut_attach_log)
+
+        # Alt+Up/Down: Navigate tests list when on versions page
+        shortcut_prev_version = QShortcut(QKeySequence("Alt+Up"), self.window)
+        shortcut_prev_version.activated.connect(self._shortcut_prev_version)
+
+        shortcut_next_version = QShortcut(QKeySequence("Alt+Down"), self.window)
+        shortcut_next_version.activated.connect(self._shortcut_next_version)
+
+        # Space/Enter: Start timer when on tests page
+        shortcut_timer = QShortcut(QKeySequence("Ctrl+Space"), self.window)
+        shortcut_timer.activated.connect(self._shortcut_toggle_timer)
+
+        # ==================== Test Status & Navigation Shortcuts ====================
+        # These shortcuts only work on the Tests page
+
+        # 1/2/3/4: Set test status (Working/Semi-working/Not working/N/A)
+        shortcut_status_1 = QShortcut(QKeySequence("1"), self.window)
+        shortcut_status_1.activated.connect(lambda: self._shortcut_set_status(1))
+
+        shortcut_status_2 = QShortcut(QKeySequence("2"), self.window)
+        shortcut_status_2.activated.connect(lambda: self._shortcut_set_status(2))
+
+        shortcut_status_3 = QShortcut(QKeySequence("3"), self.window)
+        shortcut_status_3.activated.connect(lambda: self._shortcut_set_status(3))
+
+        shortcut_status_4 = QShortcut(QKeySequence("4"), self.window)
+        shortcut_status_4.activated.connect(lambda: self._shortcut_set_status(4))
+
+        # Tab/Enter: Next test (only when not in text field)
+        shortcut_next_test = QShortcut(QKeySequence("Ctrl+Down"), self.window)
+        shortcut_next_test.activated.connect(self._shortcut_next_test)
+
+        # Also allow Enter for next test (common workflow)
+        shortcut_next_test_enter = QShortcut(QKeySequence("Ctrl+Return"), self.window)
+        shortcut_next_test_enter.activated.connect(self._shortcut_next_test)
+
+        # Shift+Tab: Previous test
+        shortcut_prev_test = QShortcut(QKeySequence("Ctrl+Up"), self.window)
+        shortcut_prev_test.activated.connect(self._shortcut_prev_test)
+
+        # Ctrl+N: Focus notes field for current test
+        shortcut_focus_notes = QShortcut(QKeySequence("Ctrl+N"), self.window)
+        shortcut_focus_notes.activated.connect(self._shortcut_focus_notes)
+
+    def _shortcut_set_status(self, status_index):
+        """Handle 1/2/3/4 shortcut - set test status."""
+        if self.stack.currentWidget() == self.tests:
+            self.tests.set_current_test_status(status_index)
+            # Auto-advance to next test after setting status
+            self.tests.next_test()
+
+    def _shortcut_next_test(self):
+        """Handle Ctrl+Down/Ctrl+Enter shortcut - next test."""
+        if self.stack.currentWidget() == self.tests:
+            self.tests.next_test()
+
+    def _shortcut_prev_test(self):
+        """Handle Ctrl+Up shortcut - previous test."""
+        if self.stack.currentWidget() == self.tests:
+            self.tests.prev_test()
+
+    def _shortcut_focus_notes(self):
+        """Handle Ctrl+N shortcut - focus notes field."""
+        if self.stack.currentWidget() == self.tests:
+            self.tests.focus_current_notes()
+
+    def _shortcut_save(self):
+        """Handle Ctrl+S shortcut - save session."""
+        self.save_session()
+        QMessageBox.information(self.window, "Saved", "Session saved successfully.")
+
+    def _shortcut_upload(self):
+        """Handle Ctrl+U shortcut - upload to panel."""
+        if self.stack.currentWidget() == self.versions:
+            self.versions.upload_to_panel()
+        else:
+            QMessageBox.information(self.window, "Hint", "Go to the Versions page (Ctrl+2) to upload to panel.")
+
+    def _shortcut_check_retests(self):
+        """Handle Ctrl+T shortcut - check retests."""
+        if self.stack.currentWidget() == self.versions:
+            self.versions.check_retests()
+        else:
+            QMessageBox.information(self.window, "Hint", "Go to the Versions page (Ctrl+2) to check retests.")
+
+    def _shortcut_refresh(self):
+        """Handle F5 shortcut - refresh current view."""
+        current = self.stack.currentWidget()
+        if current == self.versions:
+            self.versions.populate()
+        elif current == self.tests and self.current_version:
+            self.tests.load_tests(self.current_version)
+
+    def _shortcut_finish_test(self):
+        """Handle Ctrl+F shortcut - finish test."""
+        if self.stack.currentWidget() == self.tests:
+            self.tests.finish()
+        else:
+            QMessageBox.information(self.window, "Hint", "Go to the Tests page (Ctrl+3) to finish a test.")
+
+    def _shortcut_back(self):
+        """Handle Escape shortcut - go back."""
+        current = self.stack.currentWidget()
+        if current == self.tests:
+            self.show_versions()
+        elif current == self.versions:
+            self.stack.setCurrentWidget(self.intro)
+
+    def _shortcut_attach_log(self):
+        """Handle Ctrl+L shortcut - attach log files."""
+        if self.stack.currentWidget() == self.tests:
+            self.tests.attach_log()
+
+    def _shortcut_prev_version(self):
+        """Handle Alt+Up shortcut - previous version."""
+        if self.stack.currentWidget() == self.versions:
+            lw = self.versions.list_widget
+            current = lw.currentRow()
+            if current > 0:
+                lw.setCurrentRow(current - 1)
+
+    def _shortcut_next_version(self):
+        """Handle Alt+Down shortcut - next version."""
+        if self.stack.currentWidget() == self.versions:
+            lw = self.versions.list_widget
+            current = lw.currentRow()
+            if current < lw.count() - 1:
+                lw.setCurrentRow(current + 1)
+
+    def _shortcut_toggle_timer(self):
+        """Handle Ctrl+Space shortcut - toggle stopwatch."""
+        if self.stack.currentWidget() == self.tests:
+            if self.tests.stopwatch_running:
+                self.tests.stop_stopwatch()
+            else:
+                self.tests.start_stopwatch()
+
+    def _show_shortcuts_help(self):
+        """Show keyboard shortcuts help dialog."""
+        shortcuts_text = """
+<h3>Keyboard Shortcuts</h3>
+
+<h4 style="color: #2196f3; margin-top: 15px;">Test Status (Tests Page)</h4>
+<table style="border-collapse: collapse; width: 100%;">
+<tr><th style="text-align:left; padding: 4px; border-bottom: 1px solid #ccc;">Shortcut</th><th style="text-align:left; padding: 4px; border-bottom: 1px solid #ccc;">Action</th></tr>
+<tr><td style="padding: 4px;"><b>1</b></td><td style="padding: 4px;">Set status: Working (then advance)</td></tr>
+<tr><td style="padding: 4px;"><b>2</b></td><td style="padding: 4px;">Set status: Semi-working (then advance)</td></tr>
+<tr><td style="padding: 4px;"><b>3</b></td><td style="padding: 4px;">Set status: Not working (then advance)</td></tr>
+<tr><td style="padding: 4px;"><b>4</b></td><td style="padding: 4px;">Set status: N/A (then advance)</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+Down</b></td><td style="padding: 4px;">Next test</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+Up</b></td><td style="padding: 4px;">Previous test</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+Enter</b></td><td style="padding: 4px;">Next test (alternate)</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+N</b></td><td style="padding: 4px;">Focus notes field</td></tr>
+</table>
+
+<h4 style="color: #27ae60; margin-top: 15px;">Navigation</h4>
+<table style="border-collapse: collapse; width: 100%;">
+<tr><th style="text-align:left; padding: 4px; border-bottom: 1px solid #ccc;">Shortcut</th><th style="text-align:left; padding: 4px; border-bottom: 1px solid #ccc;">Action</th></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+1</b></td><td style="padding: 4px;">Go to Intro page</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+2</b></td><td style="padding: 4px;">Go to Versions page</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+3</b></td><td style="padding: 4px;">Go to Tests page</td></tr>
+<tr><td style="padding: 4px;"><b>Escape</b></td><td style="padding: 4px;">Go back</td></tr>
+<tr><td style="padding: 4px;"><b>Alt+Up/Down</b></td><td style="padding: 4px;">Navigate versions list</td></tr>
+</table>
+
+<h4 style="color: #9b59b6; margin-top: 15px;">Session & Reports</h4>
+<table style="border-collapse: collapse; width: 100%;">
+<tr><th style="text-align:left; padding: 4px; border-bottom: 1px solid #ccc;">Shortcut</th><th style="text-align:left; padding: 4px; border-bottom: 1px solid #ccc;">Action</th></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+S</b></td><td style="padding: 4px;">Save session</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+R</b></td><td style="padding: 4px;">Reload session</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+E</b></td><td style="padding: 4px;">Export HTML report</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+U</b></td><td style="padding: 4px;">Upload to panel</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+T</b></td><td style="padding: 4px;">Check retests</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+F</b></td><td style="padding: 4px;">Finish current test</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+L</b></td><td style="padding: 4px;">Attach log files</td></tr>
+<tr><td style="padding: 4px;"><b>Ctrl+Space</b></td><td style="padding: 4px;">Toggle stopwatch</td></tr>
+<tr><td style="padding: 4px;"><b>F5</b></td><td style="padding: 4px;">Refresh current view</td></tr>
+<tr><td style="padding: 4px;"><b>F1</b></td><td style="padding: 4px;">Show this help</td></tr>
+</table>
+"""
+        dlg = QDialog(self.window)
+        dlg.setWindowTitle("Keyboard Shortcuts")
+        dlg.setMinimumSize(450, 580)
+        layout = QVBoxLayout()
+        label = QLabel(shortcuts_text)
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+        dlg.setLayout(layout)
+        dlg.exec_()
+
     def run(self):
+        # Setup keyboard shortcuts before showing window
+        self._setup_keyboard_shortcuts()
         self.window.resize(950, 800)  # Larger to accommodate API settings
         self.window.show()
         sys.exit(self.app.exec_())

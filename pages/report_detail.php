@@ -54,6 +54,16 @@ foreach ($pendingRetestRequests as $req) {
     $key = $req['test_key'] . '|' . $req['client_version'];
     $retestNotesMap[$key] = $req['notes'] ?? '';
 }
+
+// Get report tags
+$reportTags = $db->getReportTags($reportId);
+$allTags = $db->getAllTags();
+
+// Get version notifications for this report
+$versionNotifications = $db->getNotificationsForVersionString(
+    $report['client_version'],
+    $report['commit_hash'] ?? null
+);
 ?>
 
 <div class="report-header">
@@ -164,6 +174,89 @@ foreach ($pendingRetestRequests as $req) {
     </div>
 </div>
 
+<!-- Version Notifications Section -->
+<?php if (!empty($versionNotifications)): ?>
+<div class="version-notifications-section">
+    <div class="notifications-header">
+        <span class="notifications-icon">⚠️</span>
+        <span class="notifications-title">Known Issues / Notes (<?= count($versionNotifications) ?>)</span>
+    </div>
+    <div class="notifications-list">
+        <?php
+        // Display oldest at bottom, newest at top (reverse the order)
+        $reversedNotifications = array_reverse($versionNotifications);
+        foreach ($reversedNotifications as $notif):
+        ?>
+            <div class="notification-item">
+                <div class="notification-name"><?= e($notif['name']) ?></div>
+                <div class="notification-message"><?= nl2br(e($notif['message'])) ?></div>
+                <div class="notification-meta">
+                    <?php if (!empty($notif['commit_hash'])): ?>
+                        <span class="meta-item">Commit: <?= e(substr($notif['commit_hash'], 0, 8)) ?></span>
+                    <?php endif; ?>
+                    <span class="meta-item">Added: <?= formatDate($notif['created_at']) ?></span>
+                    <?php if (!empty($notif['created_by_name'])): ?>
+                        <span class="meta-item">By: <?= e($notif['created_by_name']) ?></span>
+                    <?php endif; ?>
+                </div>
+            </div>
+        <?php endforeach; ?>
+    </div>
+</div>
+<?php endif; ?>
+
+<!-- Report Tags Section -->
+<div class="report-tags-section" id="report-tags-section">
+    <div class="tags-display">
+        <span class="tags-label">Tags:</span>
+        <div class="tags-container" id="report-tags-container">
+            <?php if (empty($reportTags)): ?>
+                <span class="no-tags">No tags assigned</span>
+            <?php else: ?>
+                <?php foreach ($reportTags as $tag): ?>
+                    <span class="report-tag" style="background-color: <?= e($tag['color']) ?>;" data-tag-id="<?= $tag['id'] ?>">
+                        <?= e($tag['name']) ?>
+                        <?php if (isAdmin()): ?>
+                            <button type="button" class="tag-remove-btn" onclick="removeReportTag(<?= $tag['id'] ?>, '<?= e(addslashes($tag['name'])) ?>')" title="Remove tag">&times;</button>
+                        <?php endif; ?>
+                    </span>
+                <?php endforeach; ?>
+            <?php endif; ?>
+        </div>
+        <?php if (isAdmin()): ?>
+            <div class="add-tag-dropdown">
+                <button type="button" class="btn btn-sm btn-secondary add-tag-btn" onclick="toggleAddTagDropdown()">+ Add Tag</button>
+                <div class="tag-dropdown-menu" id="tag-dropdown-menu" style="display: none;">
+                    <?php foreach ($allTags as $tag):
+                        $isAssigned = false;
+                        foreach ($reportTags as $rt) {
+                            if ($rt['id'] == $tag['id']) {
+                                $isAssigned = true;
+                                break;
+                            }
+                        }
+                        if ($isAssigned) continue;
+                    ?>
+                        <div class="tag-dropdown-item" onclick="addReportTag(<?= $tag['id'] ?>, '<?= e(addslashes($tag['name'])) ?>', '<?= e($tag['color']) ?>')">
+                            <span class="tag-color-preview" style="background-color: <?= e($tag['color']) ?>;"></span>
+                            <span class="tag-name"><?= e($tag['name']) ?></span>
+                            <?php if ($tag['description']): ?>
+                                <span class="tag-desc"><?= e($tag['description']) ?></span>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+                    <?php if (count($allTags) === count($reportTags)): ?>
+                        <div class="tag-dropdown-empty">All tags assigned</div>
+                    <?php endif; ?>
+                    <div class="tag-dropdown-footer">
+                        <a href="?page=admin_tags" class="tag-manage-link">Manage Tags</a>
+                    </div>
+                </div>
+            </div>
+        <?php endif; ?>
+    </div>
+</div>
+
 <!-- Stats Summary - Clickable -->
 <div class="stats-grid" style="margin-bottom: 30px;">
     <a href="?page=results&report_id=<?= $reportId ?>&status=Working" class="stat-card working clickable-card">
@@ -213,10 +306,13 @@ foreach ($pendingRetestRequests as $req) {
                         <td><?= formatDate($log['log_datetime']) ?></td>
                         <td><?= number_format($log['size_original']) ?> B</td>
                         <td><?= number_format($log['size_compressed']) ?> B</td>
-                        <td>
+                        <td style="white-space: nowrap;">
                             <a href="api/download_log.php?id=<?= $log['id'] ?>" class="btn btn-sm" title="Download log file">
                                 ⬇️ Download
                             </a>
+                            <button type="button" class="btn btn-sm btn-secondary" onclick="openLogViewer(<?= $log['id'] ?>, '<?= e(addslashes($log['filename'])) ?>')" title="View log file">
+                                📄 Open
+                            </button>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -435,6 +531,254 @@ $isUserAdmin = isAdmin();
 
 <style>
 .hidden { display: none; }
+
+/* Version Notifications Section */
+.version-notifications-section {
+    background: #2a1f1f;
+    border: 2px solid #e74c3c;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    overflow: hidden;
+}
+
+.notifications-header {
+    background: rgba(231, 76, 60, 0.2);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid rgba(231, 76, 60, 0.3);
+}
+
+.notifications-icon {
+    font-size: 20px;
+}
+
+.notifications-title {
+    font-weight: 600;
+    color: #e74c3c;
+    font-size: 14px;
+}
+
+.notifications-list {
+    padding: 15px 20px;
+}
+
+.notification-item {
+    background: rgba(0, 0, 0, 0.2);
+    border-left: 3px solid #e74c3c;
+    border-radius: 0 6px 6px 0;
+    padding: 12px 15px;
+    margin-bottom: 12px;
+}
+
+.notification-item:last-child {
+    margin-bottom: 0;
+}
+
+.notification-name {
+    font-weight: 600;
+    color: #f39c12;
+    font-size: 14px;
+    margin-bottom: 6px;
+}
+
+.notification-message {
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+    margin-bottom: 8px;
+}
+
+.notification-meta {
+    display: flex;
+    gap: 15px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.notification-meta .meta-item {
+    display: flex;
+    gap: 4px;
+}
+
+/* Report Tags Section */
+.report-tags-section {
+    background: var(--bg-card);
+    border-radius: 8px;
+    padding: 12px 20px;
+    margin-bottom: 20px;
+    border: 1px solid var(--border);
+}
+
+.tags-display {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.tags-label {
+    font-weight: 600;
+    color: var(--text-muted);
+    font-size: 13px;
+}
+
+.tags-container {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.no-tags {
+    color: var(--text-muted);
+    font-size: 13px;
+    font-style: italic;
+}
+
+.report-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+    animation: tagFadeIn 0.2s ease-out;
+}
+
+@keyframes tagFadeIn {
+    from {
+        opacity: 0;
+        transform: scale(0.8);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.tag-remove-btn {
+    background: none;
+    border: none;
+    color: rgba(255,255,255,0.7);
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    padding: 0 2px;
+    margin-left: 2px;
+    line-height: 1;
+}
+
+.tag-remove-btn:hover {
+    color: #fff;
+}
+
+.add-tag-dropdown {
+    position: relative;
+}
+
+.add-tag-btn {
+    font-size: 12px;
+    padding: 4px 10px;
+}
+
+.tag-dropdown-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 5px 20px rgba(0,0,0,0.4);
+    z-index: 1000;
+    min-width: 220px;
+    max-height: 300px;
+    overflow-y: auto;
+    animation: dropdownSlideIn 0.15s ease-out;
+}
+
+@keyframes dropdownSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-5px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.tag-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-bottom: 1px solid var(--border);
+}
+
+.tag-dropdown-item:last-of-type {
+    border-bottom: none;
+}
+
+.tag-dropdown-item:hover {
+    background: var(--bg-accent);
+}
+
+.tag-color-preview {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.tag-dropdown-item .tag-name {
+    font-weight: 500;
+    color: var(--text);
+    font-size: 13px;
+}
+
+.tag-dropdown-item .tag-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: auto;
+    max-width: 120px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tag-dropdown-empty {
+    padding: 15px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-style: italic;
+}
+
+.tag-dropdown-footer {
+    padding: 8px 12px;
+    background: var(--bg-dark);
+    border-top: 1px solid var(--border);
+    text-align: center;
+}
+
+.tag-manage-link {
+    font-size: 12px;
+    color: var(--primary);
+    text-decoration: none;
+}
+
+.tag-manage-link:hover {
+    text-decoration: underline;
+}
 
 /* Revision indicators */
 .revision-indicator {
@@ -1655,5 +1999,558 @@ function showCommitPopupDialog(title, content) {
     document.body.appendChild(overlay);
 }
 </script>
+
+<!-- Log Viewer Modal -->
+<div id="log-viewer-modal" class="log-viewer-overlay" style="display: none;">
+    <div class="log-viewer-modal">
+        <div class="log-viewer-header">
+            <h3 id="log-viewer-title">Log Viewer</h3>
+            <div class="log-viewer-controls">
+                <button type="button" class="btn btn-sm" onclick="toggleLogWordWrap()" title="Toggle word wrap" id="wrap-toggle-btn">
+                    ↔️ Wrap
+                </button>
+                <button type="button" class="btn btn-sm" onclick="copyLogContent()" title="Copy to clipboard">
+                    📋 Copy
+                </button>
+                <button type="button" class="btn btn-sm" onclick="downloadCurrentLog()" title="Download file" id="download-log-btn">
+                    ⬇️ Download
+                </button>
+                <button type="button" class="log-viewer-close" onclick="closeLogViewer()">&times;</button>
+            </div>
+        </div>
+        <div class="log-viewer-info" id="log-viewer-info"></div>
+        <div class="log-viewer-body">
+            <div class="log-viewer-loading" id="log-viewer-loading">
+                <span>Loading log file...</span>
+            </div>
+            <pre class="log-viewer-content" id="log-viewer-content"></pre>
+        </div>
+        <div class="log-viewer-footer">
+            <div class="log-viewer-stats" id="log-viewer-stats"></div>
+            <button type="button" class="btn btn-secondary" onclick="closeLogViewer()">Close</button>
+        </div>
+    </div>
+</div>
+
+<style>
+/* Log Viewer Modal Styles */
+.log-viewer-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.log-viewer-modal {
+    background: var(--bg-card);
+    border-radius: 8px;
+    width: 95%;
+    max-width: 1200px;
+    height: 90vh;
+    max-height: 900px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 50px rgba(0, 0, 0, 0.6);
+    border-top: solid 2px #899281;
+    border-bottom: solid 2px #292d23;
+    border-left: solid 2px #899281;
+    border-right: solid 2px #292d23;
+    animation: logViewerSlideIn 0.2s ease-out;
+}
+
+@keyframes logViewerSlideIn {
+    from {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.log-viewer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-accent);
+    border-radius: 6px 6px 0 0;
+}
+
+.log-viewer-header h3 {
+    margin: 0;
+    color: var(--primary);
+    font-size: 16px;
+    font-family: monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 60%;
+}
+
+.log-viewer-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.log-viewer-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 28px;
+    cursor: pointer;
+    padding: 0 8px;
+    line-height: 1;
+    margin-left: 10px;
+}
+
+.log-viewer-close:hover {
+    color: #c45050;
+}
+
+.log-viewer-info {
+    padding: 8px 20px;
+    background: var(--bg-dark);
+    font-size: 12px;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+.log-viewer-info .info-item {
+    display: flex;
+    gap: 6px;
+}
+
+.log-viewer-info .info-label {
+    color: var(--text-muted);
+}
+
+.log-viewer-info .info-value {
+    color: var(--text);
+    font-family: monospace;
+}
+
+.log-viewer-body {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    background: #1e2218;
+}
+
+.log-viewer-loading {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--primary);
+    font-size: 14px;
+}
+
+.log-viewer-content {
+    margin: 0;
+    padding: 15px 20px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #b8c4ad;
+    background: #1e2218;
+    overflow: auto;
+    height: 100%;
+    white-space: pre;
+    tab-size: 4;
+}
+
+.log-viewer-content.word-wrap {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+/* Log syntax highlighting */
+.log-viewer-content .log-timestamp {
+    color: #7ea64b;
+}
+
+.log-viewer-content .log-error {
+    color: #c45050;
+    font-weight: bold;
+}
+
+.log-viewer-content .log-warning {
+    color: #c4b550;
+}
+
+.log-viewer-content .log-info {
+    color: #3498db;
+}
+
+.log-viewer-content .log-debug {
+    color: #808080;
+}
+
+.log-viewer-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--bg-dark);
+    border-radius: 0 0 6px 6px;
+}
+
+.log-viewer-stats {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    gap: 20px;
+}
+
+.log-viewer-stats span {
+    display: flex;
+    gap: 5px;
+}
+
+/* Wrap button active state */
+#wrap-toggle-btn.active {
+    background: var(--primary);
+    color: #fff;
+}
+</style>
+
+<script>
+var currentLogId = null;
+var currentLogFilename = null;
+var currentLogContent = null;
+var logWordWrap = false;
+
+function openLogViewer(logId, filename) {
+    currentLogId = logId;
+    currentLogFilename = filename;
+    currentLogContent = null;
+
+    // Show modal
+    document.getElementById('log-viewer-modal').style.display = 'flex';
+    document.getElementById('log-viewer-title').textContent = filename;
+    document.getElementById('log-viewer-content').textContent = '';
+    document.getElementById('log-viewer-loading').style.display = 'block';
+    document.getElementById('log-viewer-info').innerHTML = '';
+    document.getElementById('log-viewer-stats').innerHTML = '';
+
+    // Fetch log content
+    fetch('api/view_log.php?id=' + logId)
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
+            document.getElementById('log-viewer-loading').style.display = 'none';
+
+            if (data.success) {
+                currentLogContent = data.content;
+
+                // Display info
+                var infoHtml = '<span class="info-item"><span class="info-label">File:</span><span class="info-value">' + escapeHtmlLog(data.filename) + '</span></span>';
+                infoHtml += '<span class="info-item"><span class="info-label">Date:</span><span class="info-value">' + escapeHtmlLog(data.datetime || 'Unknown') + '</span></span>';
+                infoHtml += '<span class="info-item"><span class="info-label">Size:</span><span class="info-value">' + formatBytes(data.size_original) + '</span></span>';
+                document.getElementById('log-viewer-info').innerHTML = infoHtml;
+
+                // Apply syntax highlighting
+                var highlighted = highlightLogContent(data.content);
+                document.getElementById('log-viewer-content').innerHTML = highlighted;
+
+                // Calculate stats
+                var lines = data.content.split('\n').length;
+                var chars = data.content.length;
+                document.getElementById('log-viewer-stats').innerHTML =
+                    '<span><strong>Lines:</strong> ' + lines.toLocaleString() + '</span>' +
+                    '<span><strong>Characters:</strong> ' + chars.toLocaleString() + '</span>';
+            } else {
+                document.getElementById('log-viewer-content').textContent = 'Error: ' + (data.error || 'Failed to load log file');
+            }
+        })
+        .catch(function(error) {
+            document.getElementById('log-viewer-loading').style.display = 'none';
+            document.getElementById('log-viewer-content').textContent = 'Error: ' + error.message;
+        });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', logViewerKeyHandler);
+}
+
+function closeLogViewer() {
+    document.getElementById('log-viewer-modal').style.display = 'none';
+    document.removeEventListener('keydown', logViewerKeyHandler);
+    currentLogId = null;
+    currentLogFilename = null;
+    currentLogContent = null;
+}
+
+function logViewerKeyHandler(e) {
+    if (e.key === 'Escape') {
+        closeLogViewer();
+    } else if (e.key === 'w' && e.ctrlKey) {
+        e.preventDefault();
+        toggleLogWordWrap();
+    }
+}
+
+function toggleLogWordWrap() {
+    logWordWrap = !logWordWrap;
+    var content = document.getElementById('log-viewer-content');
+    var btn = document.getElementById('wrap-toggle-btn');
+
+    if (logWordWrap) {
+        content.classList.add('word-wrap');
+        btn.classList.add('active');
+    } else {
+        content.classList.remove('word-wrap');
+        btn.classList.remove('active');
+    }
+}
+
+function copyLogContent() {
+    if (!currentLogContent) return;
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(currentLogContent).then(function() {
+            showNotification('Log content copied to clipboard!', 'success');
+        }).catch(function() {
+            fallbackCopyLog();
+        });
+    } else {
+        fallbackCopyLog();
+    }
+}
+
+function fallbackCopyLog() {
+    var textarea = document.createElement('textarea');
+    textarea.value = currentLogContent;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+        document.execCommand('copy');
+        showNotification('Log content copied to clipboard!', 'success');
+    } catch (err) {
+        showNotification('Failed to copy', 'error');
+    }
+    document.body.removeChild(textarea);
+}
+
+function downloadCurrentLog() {
+    if (currentLogId) {
+        window.location.href = 'api/download_log.php?id=' + currentLogId;
+    }
+}
+
+function highlightLogContent(content) {
+    // Escape HTML first
+    var escaped = escapeHtmlLog(content);
+
+    // Apply syntax highlighting for common log patterns
+    // Timestamps: various formats
+    escaped = escaped.replace(/(\d{4}[-\/]\d{2}[-\/]\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/g, '<span class="log-timestamp">$1</span>');
+    escaped = escaped.replace(/(\[\d{2}:\d{2}:\d{2}\])/g, '<span class="log-timestamp">$1</span>');
+
+    // Error patterns
+    escaped = escaped.replace(/(\bERROR\b|\bFATAL\b|\bCRITICAL\b|\bFAILED\b|\bFAILURE\b|\bException\b)/gi, '<span class="log-error">$1</span>');
+
+    // Warning patterns
+    escaped = escaped.replace(/(\bWARN(?:ING)?\b|\bCAUTION\b)/gi, '<span class="log-warning">$1</span>');
+
+    // Info patterns
+    escaped = escaped.replace(/(\bINFO\b|\bNOTICE\b)/gi, '<span class="log-info">$1</span>');
+
+    // Debug patterns
+    escaped = escaped.replace(/(\bDEBUG\b|\bTRACE\b)/gi, '<span class="log-debug">$1</span>');
+
+    return escaped;
+}
+
+function escapeHtmlLog(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    var k = 1024;
+    var sizes = ['B', 'KB', 'MB', 'GB'];
+    var i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Close on overlay click
+document.getElementById('log-viewer-modal')?.addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeLogViewer();
+    }
+});
+</script>
+
+<!-- Report Tags JavaScript -->
+<?php if (isAdmin()): ?>
+<script>
+var reportId = <?= $reportId ?>;
+
+// Toggle add tag dropdown
+function toggleAddTagDropdown() {
+    var dropdown = document.getElementById('tag-dropdown-menu');
+    if (dropdown.style.display === 'none') {
+        dropdown.style.display = 'block';
+        // Close when clicking outside
+        setTimeout(function() {
+            document.addEventListener('click', closeTagDropdownOnClickOutside);
+        }, 10);
+    } else {
+        dropdown.style.display = 'none';
+        document.removeEventListener('click', closeTagDropdownOnClickOutside);
+    }
+}
+
+function closeTagDropdownOnClickOutside(e) {
+    var dropdown = document.getElementById('tag-dropdown-menu');
+    var btn = document.querySelector('.add-tag-btn');
+    if (!dropdown.contains(e.target) && e.target !== btn) {
+        dropdown.style.display = 'none';
+        document.removeEventListener('click', closeTagDropdownOnClickOutside);
+    }
+}
+
+// Add tag to report
+function addReportTag(tagId, tagName, tagColor) {
+    fetch('api/report_tags.php?action=add', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            report_id: reportId,
+            tag_id: tagId
+        })
+    })
+    .then(function(response) { return response.json(); })
+    .then(function(data) {
+        if (data.success) {
+            // Add tag to display
+            var container = document.getElementById('report-tags-container');
+            var noTags = container.querySelector('.no-tags');
+            if (noTags) {
+                noTags.remove();
+            }
+
+            var tagEl = document.createElement('span');
+            tagEl.className = 'report-tag';
+            tagEl.style.backgroundColor = tagColor;
+            tagEl.setAttribute('data-tag-id', tagId);
+            tagEl.innerHTML = escapeHtmlTag(tagName) +
+                '<button type="button" class="tag-remove-btn" onclick="removeReportTag(' + tagId + ', \'' + escapeHtmlTag(tagName) + '\')" title="Remove tag">&times;</button>';
+            container.appendChild(tagEl);
+
+            // Remove from dropdown
+            var dropdownItems = document.querySelectorAll('.tag-dropdown-item');
+            dropdownItems.forEach(function(item) {
+                if (item.onclick && item.onclick.toString().includes('addReportTag(' + tagId)) {
+                    item.remove();
+                }
+            });
+
+            // Check if dropdown is empty
+            var remainingItems = document.querySelectorAll('.tag-dropdown-item').length;
+            if (remainingItems === 0) {
+                var dropdown = document.getElementById('tag-dropdown-menu');
+                var footer = dropdown.querySelector('.tag-dropdown-footer');
+                var emptyMsg = document.createElement('div');
+                emptyMsg.className = 'tag-dropdown-empty';
+                emptyMsg.textContent = 'All tags assigned';
+                dropdown.insertBefore(emptyMsg, footer);
+            }
+
+            // Close dropdown
+            document.getElementById('tag-dropdown-menu').style.display = 'none';
+
+            showNotification('Tag "' + tagName + '" added', 'success');
+        } else {
+            showNotification('Error: ' + (data.error || 'Failed to add tag'), 'error');
+        }
+    })
+    .catch(function(error) {
+        showNotification('Error: ' + error.message, 'error');
+    });
+}
+
+// Remove tag from report
+function removeReportTag(tagId, tagName) {
+    if (!confirm('Remove tag "' + tagName + '" from this report?')) {
+        return;
+    }
+
+    fetch('api/report_tags.php?action=remove', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            report_id: reportId,
+            tag_id: tagId
+        })
+    })
+    .then(function(response) { return response.json(); })
+    .then(function(data) {
+        if (data.success) {
+            // Remove tag from display
+            var tagEl = document.querySelector('.report-tag[data-tag-id="' + tagId + '"]');
+            if (tagEl) {
+                tagEl.style.animation = 'tagFadeOut 0.2s ease-out';
+                setTimeout(function() {
+                    tagEl.remove();
+
+                    // Check if no tags left
+                    var container = document.getElementById('report-tags-container');
+                    if (!container.querySelector('.report-tag')) {
+                        var noTags = document.createElement('span');
+                        noTags.className = 'no-tags';
+                        noTags.textContent = 'No tags assigned';
+                        container.appendChild(noTags);
+                    }
+                }, 200);
+            }
+
+            // Refresh page to get updated dropdown (simpler than reconstructing)
+            showNotification('Tag removed. Refreshing...', 'success');
+            setTimeout(function() {
+                location.reload();
+            }, 500);
+        } else {
+            showNotification('Error: ' + (data.error || 'Failed to remove tag'), 'error');
+        }
+    })
+    .catch(function(error) {
+        showNotification('Error: ' + error.message, 'error');
+    });
+}
+
+function escapeHtmlTag(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Add fade out animation
+var tagStyle = document.createElement('style');
+tagStyle.textContent = '@keyframes tagFadeOut { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(0.8); } }';
+document.head.appendChild(tagStyle);
+</script>
+<?php endif; ?>
 
 <?php require_once __DIR__ . '/../includes/footer.php'; ?>

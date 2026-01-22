@@ -181,6 +181,48 @@ CREATE TABLE IF NOT EXISTS report_comments (
     FOREIGN KEY (parent_comment_id) REFERENCES report_comments(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
+-- Test templates/presets table
+CREATE TABLE IF NOT EXISTS test_templates (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    test_keys JSON NOT NULL COMMENT 'Array of test keys included in this template',
+    created_by INT NOT NULL,
+    is_default TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Whether this is the default template',
+    is_system TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'System templates cannot be deleted',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_name (name),
+    INDEX idx_is_default (is_default),
+    INDEX idx_created_by (created_by),
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Report tags/labels table
+CREATE TABLE IF NOT EXISTS report_tags (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE,
+    color VARCHAR(7) NOT NULL DEFAULT '#808080' COMMENT 'Hex color code for display',
+    description VARCHAR(255) DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_name (name)
+) ENGINE=InnoDB;
+
+-- Report-tag associations (many-to-many)
+CREATE TABLE IF NOT EXISTS report_tag_assignments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    report_id INT NOT NULL,
+    tag_id INT NOT NULL,
+    assigned_by INT NOT NULL,
+    assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_report_tag (report_id, tag_id),
+    INDEX idx_report_id (report_id),
+    INDEX idx_tag_id (tag_id),
+    FOREIGN KEY (report_id) REFERENCES reports(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id) REFERENCES report_tags(id) ON DELETE CASCADE,
+    FOREIGN KEY (assigned_by) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- Insert default admin user (password: steamtest2024)
 INSERT INTO users (username, password, role, api_key, created_at)
 VALUES (
@@ -190,3 +232,69 @@ VALUES (
     'sk_test_de399dc5ef7e6340e721e355a72a0484',
     NOW()
 ) ON DUPLICATE KEY UPDATE username = username;
+
+-- Client versions table (managed list of supported client versions)
+CREATE TABLE IF NOT EXISTS client_versions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    version_id VARCHAR(255) NOT NULL UNIQUE COMMENT 'Full version string (e.g., secondblob.bin.2004-01-15)',
+    display_name VARCHAR(255) DEFAULT NULL COMMENT 'Optional friendly display name',
+    steam_date DATE DEFAULT NULL COMMENT 'Steam version date',
+    steam_time VARCHAR(20) DEFAULT NULL COMMENT 'Steam version time',
+    packages JSON COMMENT 'Array of package names (e.g., ["Steam_0", "SteamUI_06001000"])',
+    skip_tests JSON COMMENT 'Array of test keys to skip for this version',
+    sort_order INT NOT NULL DEFAULT 0 COMMENT 'Sort order (lower = newer)',
+    is_enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'Whether this version is active for testing',
+    created_by INT DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_version_id (version_id),
+    INDEX idx_steam_date (steam_date),
+    INDEX idx_sort_order (sort_order),
+    INDEX idx_is_enabled (is_enabled),
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- Version notifications table (quick notes/known issues per version)
+CREATE TABLE IF NOT EXISTS version_notifications (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    client_version_id INT NOT NULL COMMENT 'References client_versions.id',
+    name VARCHAR(255) NOT NULL COMMENT 'Unique name/title for this notification',
+    message TEXT NOT NULL COMMENT 'Notification content (supports HTML and BBCode)',
+    commit_hash VARCHAR(50) DEFAULT NULL COMMENT 'Optional: only show on reports with this commit hash',
+    created_by INT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_client_version (client_version_id),
+    INDEX idx_commit_hash (commit_hash),
+    INDEX idx_created_at (created_at),
+    UNIQUE KEY unique_version_name (client_version_id, name),
+    FOREIGN KEY (client_version_id) REFERENCES client_versions(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- Invite codes table (for user registration)
+CREATE TABLE IF NOT EXISTS invite_codes (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(64) NOT NULL UNIQUE,
+    created_by INT NOT NULL COMMENT 'Admin who created this invite',
+    used_by INT DEFAULT NULL COMMENT 'User who used this invite',
+    expires_at DATETIME NOT NULL COMMENT 'Expiration time (3 days from creation)',
+    used_at DATETIME DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_code (code),
+    INDEX idx_created_by (created_by),
+    INDEX idx_expires_at (expires_at),
+    INDEX idx_used_by (used_by),
+    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- Insert default report tags
+INSERT INTO report_tags (name, color, description) VALUES
+    ('verified', '#27ae60', 'Report has been verified by admin'),
+    ('needs-review', '#f39c12', 'Report needs admin review'),
+    ('regression', '#e74c3c', 'Report shows regression from previous version'),
+    ('incomplete', '#95a5a6', 'Report is incomplete or missing tests'),
+    ('milestone', '#9b59b6', 'Important milestone release'),
+    ('bugfix', '#3498db', 'Report for a bugfix build')
+ON DUPLICATE KEY UPDATE name = name;

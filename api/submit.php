@@ -109,11 +109,58 @@ foreach ($allReports as $parsed) {
             }
         }
 
+        // Check for regressions and create notifications
+        $regressionsDetected = 0;
+        try {
+            // Get the latest revision (which was just archived if this was an update)
+            $pdo = $db->getPdo();
+            $stmt = $pdo->prepare("
+                SELECT test_results, changes_diff
+                FROM report_revisions
+                WHERE report_id = ?
+                ORDER BY revision_number DESC
+                LIMIT 1
+            ");
+            $stmt->execute([$reportId]);
+            $latestRevision = $stmt->fetch();
+
+            if ($latestRevision && $latestRevision['test_results']) {
+                $oldResults = json_decode($latestRevision['test_results'], true) ?? [];
+
+                // Convert new results to array format for comparison
+                $newResultsArray = [];
+                foreach ($cleanedResults as $testKey => $result) {
+                    $newResultsArray[] = [
+                        'test_key' => $testKey,
+                        'status' => $result['status']
+                    ];
+                }
+
+                // Detect regressions
+                $regressions = $db->detectRegressions($oldResults, $newResultsArray);
+
+                if (!empty($regressions)) {
+                    $regressionsDetected = count($regressions);
+                    // Create notifications for admins
+                    $db->createRegressionNotifications(
+                        $reportId,
+                        $parsed['client_version'],
+                        $parsed['tester'],
+                        $regressions
+                    );
+                }
+            }
+        } catch (Exception $e) {
+            // Regression detection failed, but don't fail the submission
+            error_log("Regression detection error: " . $e->getMessage());
+        }
+
         $insertedReports[] = [
             'report_id' => $reportId,
             'client_version' => $parsed['client_version'],
             'tests_recorded' => $insertedCount,
             'logs_attached' => $logsCount,
+            'regressions_detected' => $regressionsDetected,
             'view_url' => getBaseUrl() . '/?page=report_detail&id=' . $reportId
         ];
     } else {

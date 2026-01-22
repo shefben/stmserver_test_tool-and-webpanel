@@ -286,38 +286,45 @@ class Database {
     public function getReports($limit = 20, $offset = 0, $filters = []) {
         $where = [];
         $params = [];
+        $join = "";
 
         if (!empty($filters['client_version'])) {
-            $where[] = "client_version = ?";
+            $where[] = "r.client_version = ?";
             $params[] = $filters['client_version'];
         }
         if (!empty($filters['test_type'])) {
-            $where[] = "test_type = ?";
+            $where[] = "r.test_type = ?";
             $params[] = $filters['test_type'];
         }
         if (!empty($filters['tester'])) {
-            $where[] = "tester = ?";
+            $where[] = "r.tester = ?";
             $params[] = $filters['tester'];
         }
         if (!empty($filters['commit_hash'])) {
-            $where[] = "commit_hash = ?";
+            $where[] = "r.commit_hash = ?";
             $params[] = $filters['commit_hash'];
         }
         if (!empty($filters['steamui_version'])) {
-            $where[] = "steamui_version = ?";
+            $where[] = "r.steamui_version = ?";
             $params[] = $filters['steamui_version'];
         }
         if (!empty($filters['steam_pkg_version'])) {
-            $where[] = "steam_pkg_version = ?";
+            $where[] = "r.steam_pkg_version = ?";
             $params[] = $filters['steam_pkg_version'];
+        }
+        if (!empty($filters['tag_id'])) {
+            $join = "INNER JOIN report_tag_assignments rta ON r.id = rta.report_id";
+            $where[] = "rta.tag_id = ?";
+            $params[] = (int)$filters['tag_id'];
         }
 
         $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
 
         $stmt = $this->pdo->prepare("
-            SELECT * FROM reports
+            SELECT r.* FROM reports r
+            $join
             $whereClause
-            ORDER BY submitted_at DESC
+            ORDER BY r.submitted_at DESC
             LIMIT ? OFFSET ?
         ");
 
@@ -334,35 +341,41 @@ class Database {
     public function countReports($filters = []) {
         $where = [];
         $params = [];
+        $join = "";
 
         if (!empty($filters['client_version'])) {
-            $where[] = "client_version = ?";
+            $where[] = "r.client_version = ?";
             $params[] = $filters['client_version'];
         }
         if (!empty($filters['test_type'])) {
-            $where[] = "test_type = ?";
+            $where[] = "r.test_type = ?";
             $params[] = $filters['test_type'];
         }
         if (!empty($filters['tester'])) {
-            $where[] = "tester = ?";
+            $where[] = "r.tester = ?";
             $params[] = $filters['tester'];
         }
         if (!empty($filters['commit_hash'])) {
-            $where[] = "commit_hash = ?";
+            $where[] = "r.commit_hash = ?";
             $params[] = $filters['commit_hash'];
         }
         if (!empty($filters['steamui_version'])) {
-            $where[] = "steamui_version = ?";
+            $where[] = "r.steamui_version = ?";
             $params[] = $filters['steamui_version'];
         }
         if (!empty($filters['steam_pkg_version'])) {
-            $where[] = "steam_pkg_version = ?";
+            $where[] = "r.steam_pkg_version = ?";
             $params[] = $filters['steam_pkg_version'];
+        }
+        if (!empty($filters['tag_id'])) {
+            $join = "INNER JOIN report_tag_assignments rta ON r.id = rta.report_id";
+            $where[] = "rta.tag_id = ?";
+            $params[] = (int)$filters['tag_id'];
         }
 
         $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
 
-        $stmt = $this->pdo->prepare("SELECT COUNT(*) as count FROM reports $whereClause");
+        $stmt = $this->pdo->prepare("SELECT COUNT(*) as count FROM reports r $join $whereClause");
         $stmt->execute($params);
         $result = $stmt->fetch();
 
@@ -1934,6 +1947,1276 @@ class Database {
         if (!$user) return false;
 
         return ($comment['user_id'] == $userId || $user['role'] === 'admin');
+    }
+
+    // =====================
+    // TEST TEMPLATES
+    // =====================
+
+    /**
+     * Ensure test_templates table exists
+     */
+    public function ensureTemplatesTable() {
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS test_templates (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL,
+                    description TEXT,
+                    test_keys JSON NOT NULL COMMENT 'Array of test keys included in this template',
+                    created_by INT NOT NULL,
+                    is_default TINYINT(1) NOT NULL DEFAULT 0,
+                    is_system TINYINT(1) NOT NULL DEFAULT 0,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_name (name),
+                    INDEX idx_is_default (is_default),
+                    INDEX idx_created_by (created_by)
+                ) ENGINE=InnoDB
+            ");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Get all test templates
+     */
+    public function getTestTemplates() {
+        $this->ensureTemplatesTable();
+        $stmt = $this->pdo->query("
+            SELECT t.*, u.username as creator_name
+            FROM test_templates t
+            LEFT JOIN users u ON t.created_by = u.id
+            ORDER BY t.is_default DESC, t.is_system DESC, t.name
+        ");
+        $templates = $stmt->fetchAll();
+
+        foreach ($templates as &$template) {
+            $template['test_keys'] = json_decode($template['test_keys'], true) ?? [];
+        }
+
+        return $templates;
+    }
+
+    /**
+     * Get a single test template
+     */
+    public function getTestTemplate($id) {
+        $this->ensureTemplatesTable();
+        $stmt = $this->pdo->prepare("
+            SELECT t.*, u.username as creator_name
+            FROM test_templates t
+            LEFT JOIN users u ON t.created_by = u.id
+            WHERE t.id = ?
+        ");
+        $stmt->execute([$id]);
+        $template = $stmt->fetch();
+
+        if ($template) {
+            $template['test_keys'] = json_decode($template['test_keys'], true) ?? [];
+        }
+
+        return $template ?: null;
+    }
+
+    /**
+     * Get the default test template
+     */
+    public function getDefaultTemplate() {
+        $this->ensureTemplatesTable();
+        $stmt = $this->pdo->query("SELECT * FROM test_templates WHERE is_default = 1 LIMIT 1");
+        $template = $stmt->fetch();
+
+        if ($template) {
+            $template['test_keys'] = json_decode($template['test_keys'], true) ?? [];
+        }
+
+        return $template ?: null;
+    }
+
+    /**
+     * Create a test template
+     */
+    public function createTestTemplate($name, $description, $testKeys, $createdBy, $isDefault = false, $isSystem = false) {
+        $this->ensureTemplatesTable();
+
+        // If setting as default, clear other defaults first
+        if ($isDefault) {
+            $this->pdo->exec("UPDATE test_templates SET is_default = 0");
+        }
+
+        $stmt = $this->pdo->prepare("
+            INSERT INTO test_templates (name, description, test_keys, created_by, is_default, is_system)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ");
+        $stmt->execute([$name, $description, json_encode($testKeys), $createdBy, $isDefault ? 1 : 0, $isSystem ? 1 : 0]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Update a test template
+     */
+    public function updateTestTemplate($id, $name, $description, $testKeys, $isDefault = null) {
+        $updates = ["name = ?", "description = ?", "test_keys = ?"];
+        $params = [$name, $description, json_encode($testKeys)];
+
+        if ($isDefault !== null) {
+            if ($isDefault) {
+                $this->pdo->exec("UPDATE test_templates SET is_default = 0");
+            }
+            $updates[] = "is_default = ?";
+            $params[] = $isDefault ? 1 : 0;
+        }
+
+        $params[] = $id;
+        $stmt = $this->pdo->prepare("UPDATE test_templates SET " . implode(", ", $updates) . " WHERE id = ?");
+        return $stmt->execute($params);
+    }
+
+    /**
+     * Delete a test template
+     */
+    public function deleteTestTemplate($id) {
+        // Don't allow deleting system templates
+        $template = $this->getTestTemplate($id);
+        if ($template && $template['is_system']) {
+            return false;
+        }
+
+        $stmt = $this->pdo->prepare("DELETE FROM test_templates WHERE id = ? AND is_system = 0");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Create default template from current TEST_KEYS
+     */
+    public function createDefaultTemplateIfNotExists($userId) {
+        $this->ensureTemplatesTable();
+
+        // Check if default template already exists
+        $existing = $this->getDefaultTemplate();
+        if ($existing) {
+            return $existing['id'];
+        }
+
+        // Create default template with all tests
+        $allTestKeys = array_keys(TEST_KEYS);
+
+        return $this->createTestTemplate(
+            'Full Test Suite',
+            'Complete test template including all available tests. This is the default template used when no other template is selected.',
+            $allTestKeys,
+            $userId,
+            true,  // isDefault
+            true   // isSystem
+        );
+    }
+
+    // =====================
+    // REPORT TAGS
+    // =====================
+
+    /**
+     * Ensure tags tables exist
+     */
+    public function ensureTagsTables() {
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS report_tags (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(50) NOT NULL UNIQUE,
+                    color VARCHAR(7) NOT NULL DEFAULT '#808080',
+                    description VARCHAR(255) DEFAULT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_name (name)
+                ) ENGINE=InnoDB
+            ");
+
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS report_tag_assignments (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    report_id INT NOT NULL,
+                    tag_id INT NOT NULL,
+                    assigned_by INT NOT NULL,
+                    assigned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY unique_report_tag (report_id, tag_id),
+                    INDEX idx_report_id (report_id),
+                    INDEX idx_tag_id (tag_id)
+                ) ENGINE=InnoDB
+            ");
+
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Get all tags
+     */
+    public function getAllTags() {
+        $this->ensureTagsTables();
+        $stmt = $this->pdo->query("
+            SELECT t.*, COUNT(rta.id) as usage_count
+            FROM report_tags t
+            LEFT JOIN report_tag_assignments rta ON t.id = rta.tag_id
+            GROUP BY t.id
+            ORDER BY t.name
+        ");
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get a single tag
+     */
+    public function getTag($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM report_tags WHERE id = ?");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get tag by name
+     */
+    public function getTagByName($name) {
+        $stmt = $this->pdo->prepare("SELECT * FROM report_tags WHERE name = ?");
+        $stmt->execute([$name]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Create a tag
+     */
+    public function createTag($name, $color = '#808080', $description = null) {
+        $this->ensureTagsTables();
+        $stmt = $this->pdo->prepare("
+            INSERT INTO report_tags (name, color, description)
+            VALUES (?, ?, ?)
+        ");
+        $stmt->execute([$name, $color, $description]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Update a tag
+     */
+    public function updateTag($id, $name, $color, $description = null) {
+        $stmt = $this->pdo->prepare("
+            UPDATE report_tags SET name = ?, color = ?, description = ?
+            WHERE id = ?
+        ");
+        return $stmt->execute([$name, $color, $description, $id]);
+    }
+
+    /**
+     * Delete a tag
+     */
+    public function deleteTag($id) {
+        // Cascade deletes handle assignments
+        $stmt = $this->pdo->prepare("DELETE FROM report_tags WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Get tags for a report
+     */
+    public function getReportTags($reportId) {
+        $this->ensureTagsTables();
+        $stmt = $this->pdo->prepare("
+            SELECT t.*, rta.assigned_at, u.username as assigned_by_name
+            FROM report_tags t
+            JOIN report_tag_assignments rta ON t.id = rta.tag_id
+            LEFT JOIN users u ON rta.assigned_by = u.id
+            WHERE rta.report_id = ?
+            ORDER BY t.name
+        ");
+        $stmt->execute([$reportId]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Add tag to report
+     */
+    public function addTagToReport($reportId, $tagId, $assignedBy) {
+        $this->ensureTagsTables();
+        try {
+            $stmt = $this->pdo->prepare("
+                INSERT INTO report_tag_assignments (report_id, tag_id, assigned_by)
+                VALUES (?, ?, ?)
+            ");
+            return $stmt->execute([$reportId, $tagId, $assignedBy]);
+        } catch (PDOException $e) {
+            // Duplicate key - tag already assigned
+            return false;
+        }
+    }
+
+    /**
+     * Remove tag from report
+     */
+    public function removeTagFromReport($reportId, $tagId) {
+        $stmt = $this->pdo->prepare("
+            DELETE FROM report_tag_assignments
+            WHERE report_id = ? AND tag_id = ?
+        ");
+        return $stmt->execute([$reportId, $tagId]);
+    }
+
+    /**
+     * Get reports by tag
+     */
+    public function getReportsByTag($tagId, $limit = 50, $offset = 0) {
+        $stmt = $this->pdo->prepare("
+            SELECT r.*
+            FROM reports r
+            JOIN report_tag_assignments rta ON r.id = rta.report_id
+            WHERE rta.tag_id = ?
+            ORDER BY r.submitted_at DESC
+            LIMIT ? OFFSET ?
+        ");
+        $stmt->execute([$tagId, $limit, $offset]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Initialize default tags
+     */
+    public function initializeDefaultTags() {
+        $this->ensureTagsTables();
+
+        $defaultTags = [
+            ['verified', '#27ae60', 'Report has been verified by admin'],
+            ['needs-review', '#f39c12', 'Report needs admin review'],
+            ['regression', '#e74c3c', 'Report shows regression from previous version'],
+            ['incomplete', '#95a5a6', 'Report is incomplete or missing tests'],
+            ['milestone', '#9b59b6', 'Important milestone release'],
+            ['bugfix', '#3498db', 'Report for a bugfix build'],
+        ];
+
+        foreach ($defaultTags as $tag) {
+            if (!$this->getTagByName($tag[0])) {
+                $this->createTag($tag[0], $tag[1], $tag[2]);
+            }
+        }
+    }
+
+    // =====================
+    // CLIENT VERSIONS
+    // =====================
+
+    /**
+     * Ensure client_versions table exists
+     */
+    public function ensureClientVersionsTable() {
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS client_versions (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    version_id VARCHAR(255) NOT NULL UNIQUE,
+                    display_name VARCHAR(255) DEFAULT NULL,
+                    steam_date DATE DEFAULT NULL,
+                    steam_time VARCHAR(20) DEFAULT NULL,
+                    packages JSON,
+                    skip_tests JSON,
+                    sort_order INT NOT NULL DEFAULT 0,
+                    is_enabled TINYINT(1) NOT NULL DEFAULT 1,
+                    created_by INT DEFAULT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_version_id (version_id),
+                    INDEX idx_steam_date (steam_date),
+                    INDEX idx_sort_order (sort_order),
+                    INDEX idx_is_enabled (is_enabled)
+                ) ENGINE=InnoDB
+            ");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Check if client_versions table exists
+     */
+    public function hasClientVersionsTable() {
+        try {
+            $this->pdo->query("SELECT 1 FROM client_versions LIMIT 1");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Get all client versions
+     */
+    public function getClientVersions($enabledOnly = false) {
+        $this->ensureClientVersionsTable();
+        $where = $enabledOnly ? "WHERE is_enabled = 1" : "";
+        $stmt = $this->pdo->query("
+            SELECT cv.*, u.username as creator_name
+            FROM client_versions cv
+            LEFT JOIN users u ON cv.created_by = u.id
+            $where
+            ORDER BY cv.sort_order ASC, cv.steam_date DESC
+        ");
+        $versions = $stmt->fetchAll();
+
+        foreach ($versions as &$version) {
+            $version['packages'] = json_decode($version['packages'], true) ?? [];
+            $version['skip_tests'] = json_decode($version['skip_tests'], true) ?? [];
+        }
+
+        return $versions;
+    }
+
+    /**
+     * Get a single client version by ID
+     */
+    public function getClientVersion($id) {
+        $this->ensureClientVersionsTable();
+        $stmt = $this->pdo->prepare("
+            SELECT cv.*, u.username as creator_name
+            FROM client_versions cv
+            LEFT JOIN users u ON cv.created_by = u.id
+            WHERE cv.id = ?
+        ");
+        $stmt->execute([$id]);
+        $version = $stmt->fetch();
+
+        if ($version) {
+            $version['packages'] = json_decode($version['packages'], true) ?? [];
+            $version['skip_tests'] = json_decode($version['skip_tests'], true) ?? [];
+        }
+
+        return $version ?: null;
+    }
+
+    /**
+     * Get client version by version_id string
+     */
+    public function getClientVersionByVersionId($versionId) {
+        $this->ensureClientVersionsTable();
+        $stmt = $this->pdo->prepare("
+            SELECT cv.*, u.username as creator_name
+            FROM client_versions cv
+            LEFT JOIN users u ON cv.created_by = u.id
+            WHERE cv.version_id = ?
+        ");
+        $stmt->execute([$versionId]);
+        $version = $stmt->fetch();
+
+        if ($version) {
+            $version['packages'] = json_decode($version['packages'], true) ?? [];
+            $version['skip_tests'] = json_decode($version['skip_tests'], true) ?? [];
+        }
+
+        return $version ?: null;
+    }
+
+    /**
+     * Create a client version
+     */
+    public function createClientVersion($versionId, $displayName, $steamDate, $steamTime, $packages, $skipTests, $sortOrder, $isEnabled, $createdBy) {
+        $this->ensureClientVersionsTable();
+        $stmt = $this->pdo->prepare("
+            INSERT INTO client_versions (version_id, display_name, steam_date, steam_time, packages, skip_tests, sort_order, is_enabled, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ");
+        $stmt->execute([
+            $versionId,
+            $displayName ?: null,
+            $steamDate ?: null,
+            $steamTime ?: null,
+            json_encode($packages ?: []),
+            json_encode($skipTests ?: []),
+            $sortOrder,
+            $isEnabled ? 1 : 0,
+            $createdBy
+        ]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Update a client version
+     */
+    public function updateClientVersion($id, $versionId, $displayName, $steamDate, $steamTime, $packages, $skipTests, $sortOrder, $isEnabled) {
+        $stmt = $this->pdo->prepare("
+            UPDATE client_versions SET
+                version_id = ?,
+                display_name = ?,
+                steam_date = ?,
+                steam_time = ?,
+                packages = ?,
+                skip_tests = ?,
+                sort_order = ?,
+                is_enabled = ?
+            WHERE id = ?
+        ");
+        return $stmt->execute([
+            $versionId,
+            $displayName ?: null,
+            $steamDate ?: null,
+            $steamTime ?: null,
+            json_encode($packages ?: []),
+            json_encode($skipTests ?: []),
+            $sortOrder,
+            $isEnabled ? 1 : 0,
+            $id
+        ]);
+    }
+
+    /**
+     * Delete a client version
+     */
+    public function deleteClientVersion($id) {
+        // Notifications are cascade deleted
+        $stmt = $this->pdo->prepare("DELETE FROM client_versions WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Get max sort order for client versions
+     */
+    public function getMaxClientVersionSortOrder() {
+        $this->ensureClientVersionsTable();
+        $stmt = $this->pdo->query("SELECT MAX(sort_order) as max_order FROM client_versions");
+        $row = $stmt->fetch();
+        return $row['max_order'] ?? 0;
+    }
+
+    /**
+     * Count client versions
+     */
+    public function countClientVersions($enabledOnly = false) {
+        $this->ensureClientVersionsTable();
+        $where = $enabledOnly ? "WHERE is_enabled = 1" : "";
+        $stmt = $this->pdo->query("SELECT COUNT(*) as count FROM client_versions $where");
+        return $stmt->fetch()['count'];
+    }
+
+    // =====================
+    // VERSION NOTIFICATIONS
+    // =====================
+
+    /**
+     * Ensure version_notifications table exists
+     */
+    public function ensureVersionNotificationsTable() {
+        $this->ensureClientVersionsTable();
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS version_notifications (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    client_version_id INT NOT NULL,
+                    name VARCHAR(255) NOT NULL,
+                    message TEXT NOT NULL,
+                    commit_hash VARCHAR(50) DEFAULT NULL,
+                    created_by INT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_client_version (client_version_id),
+                    INDEX idx_commit_hash (commit_hash),
+                    INDEX idx_created_at (created_at),
+                    UNIQUE KEY unique_version_name (client_version_id, name)
+                ) ENGINE=InnoDB
+            ");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Check if version_notifications table exists
+     */
+    public function hasVersionNotificationsTable() {
+        try {
+            $this->pdo->query("SELECT 1 FROM version_notifications LIMIT 1");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Get all version notifications
+     */
+    public function getVersionNotifications($limit = 100, $offset = 0) {
+        $this->ensureVersionNotificationsTable();
+        $stmt = $this->pdo->prepare("
+            SELECT vn.*, cv.version_id as client_version, u.username as created_by_name
+            FROM version_notifications vn
+            JOIN client_versions cv ON vn.client_version_id = cv.id
+            JOIN users u ON vn.created_by = u.id
+            ORDER BY vn.created_at DESC
+            LIMIT ? OFFSET ?
+        ");
+        $stmt->execute([$limit, $offset]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get a single version notification
+     */
+    public function getVersionNotification($id) {
+        $this->ensureVersionNotificationsTable();
+        $stmt = $this->pdo->prepare("
+            SELECT vn.*, cv.version_id as client_version, u.username as created_by_name
+            FROM version_notifications vn
+            JOIN client_versions cv ON vn.client_version_id = cv.id
+            JOIN users u ON vn.created_by = u.id
+            WHERE vn.id = ?
+        ");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get notifications for a specific client version
+     * If commitHash is provided, also include notifications matching that commit
+     */
+    public function getNotificationsForVersion($clientVersionId, $commitHash = null) {
+        $this->ensureVersionNotificationsTable();
+
+        if ($commitHash) {
+            // Get notifications that either have no commit hash OR match the provided commit hash
+            $stmt = $this->pdo->prepare("
+                SELECT vn.*, cv.version_id as client_version, u.username as created_by_name
+                FROM version_notifications vn
+                JOIN client_versions cv ON vn.client_version_id = cv.id
+                JOIN users u ON vn.created_by = u.id
+                WHERE vn.client_version_id = ?
+                  AND (vn.commit_hash IS NULL OR vn.commit_hash = '' OR vn.commit_hash = ?)
+                ORDER BY vn.created_at ASC
+            ");
+            $stmt->execute([$clientVersionId, $commitHash]);
+        } else {
+            // Get only notifications without a commit hash
+            $stmt = $this->pdo->prepare("
+                SELECT vn.*, cv.version_id as client_version, u.username as created_by_name
+                FROM version_notifications vn
+                JOIN client_versions cv ON vn.client_version_id = cv.id
+                JOIN users u ON vn.created_by = u.id
+                WHERE vn.client_version_id = ?
+                  AND (vn.commit_hash IS NULL OR vn.commit_hash = '')
+                ORDER BY vn.created_at ASC
+            ");
+            $stmt->execute([$clientVersionId]);
+        }
+
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get notifications for a client version by version_id string
+     */
+    public function getNotificationsForVersionString($versionId, $commitHash = null) {
+        $version = $this->getClientVersionByVersionId($versionId);
+        if (!$version) {
+            return [];
+        }
+        return $this->getNotificationsForVersion($version['id'], $commitHash);
+    }
+
+    /**
+     * Create a version notification
+     */
+    public function createVersionNotification($clientVersionId, $name, $message, $commitHash, $createdBy) {
+        $this->ensureVersionNotificationsTable();
+        $stmt = $this->pdo->prepare("
+            INSERT INTO version_notifications (client_version_id, name, message, commit_hash, created_by)
+            VALUES (?, ?, ?, ?, ?)
+        ");
+        $stmt->execute([
+            $clientVersionId,
+            $name,
+            $message,
+            $commitHash ?: null,
+            $createdBy
+        ]);
+        return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Update a version notification
+     */
+    public function updateVersionNotification($id, $clientVersionId, $name, $message, $commitHash) {
+        $stmt = $this->pdo->prepare("
+            UPDATE version_notifications SET
+                client_version_id = ?,
+                name = ?,
+                message = ?,
+                commit_hash = ?
+            WHERE id = ?
+        ");
+        return $stmt->execute([
+            $clientVersionId,
+            $name,
+            $message,
+            $commitHash ?: null,
+            $id
+        ]);
+    }
+
+    /**
+     * Delete a version notification
+     */
+    public function deleteVersionNotification($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM version_notifications WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Count version notifications
+     */
+    public function countVersionNotifications() {
+        $this->ensureVersionNotificationsTable();
+        $stmt = $this->pdo->query("SELECT COUNT(*) as count FROM version_notifications");
+        return $stmt->fetch()['count'];
+    }
+
+    /**
+     * Get notifications grouped by client version for display
+     */
+    public function getNotificationsGroupedByVersion() {
+        $this->ensureVersionNotificationsTable();
+        $notifications = $this->getVersionNotifications(500, 0);
+        $grouped = [];
+
+        foreach ($notifications as $notification) {
+            $versionId = $notification['client_version'];
+            if (!isset($grouped[$versionId])) {
+                $grouped[$versionId] = [];
+            }
+            $grouped[$versionId][] = $notification;
+        }
+
+        return $grouped;
+    }
+
+    // =====================
+    // INVITE CODES
+    // =====================
+
+    /**
+     * Ensure invite_codes table exists
+     */
+    public function ensureInviteCodesTable() {
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS invite_codes (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    code VARCHAR(64) NOT NULL UNIQUE,
+                    created_by INT NOT NULL COMMENT 'Admin who created this invite',
+                    used_by INT DEFAULT NULL COMMENT 'User who used this invite',
+                    expires_at DATETIME NOT NULL COMMENT 'Expiration time (3 days from creation)',
+                    used_at DATETIME DEFAULT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_code (code),
+                    INDEX idx_created_by (created_by),
+                    INDEX idx_expires_at (expires_at),
+                    INDEX idx_used_by (used_by),
+                    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
+                ) ENGINE=InnoDB
+            ");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Generate a random invite code
+     */
+    private function generateInviteCode() {
+        return 'INV-' . strtoupper(bin2hex(random_bytes(12)));
+    }
+
+    /**
+     * Create a new invite code
+     * @param int $createdBy User ID of the admin creating the invite
+     * @param int $expiryDays Number of days until expiration (default: 3)
+     * @return array|false The invite code record or false on failure
+     */
+    public function createInviteCode($createdBy, $expiryDays = 3) {
+        $this->ensureInviteCodesTable();
+
+        $code = $this->generateInviteCode();
+        $expiresAt = date('Y-m-d H:i:s', strtotime("+{$expiryDays} days"));
+
+        $stmt = $this->pdo->prepare("
+            INSERT INTO invite_codes (code, created_by, expires_at, created_at)
+            VALUES (?, ?, ?, NOW())
+        ");
+
+        if ($stmt->execute([$code, $createdBy, $expiresAt])) {
+            return $this->getInviteCode($code);
+        }
+
+        return false;
+    }
+
+    /**
+     * Get an invite code by its code string
+     */
+    public function getInviteCode($code) {
+        $this->ensureInviteCodesTable();
+        $stmt = $this->pdo->prepare("
+            SELECT ic.*, u_created.username as created_by_username, u_used.username as used_by_username
+            FROM invite_codes ic
+            LEFT JOIN users u_created ON ic.created_by = u_created.id
+            LEFT JOIN users u_used ON ic.used_by = u_used.id
+            WHERE ic.code = ?
+        ");
+        $stmt->execute([$code]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get an invite code by ID
+     */
+    public function getInviteCodeById($id) {
+        $this->ensureInviteCodesTable();
+        $stmt = $this->pdo->prepare("
+            SELECT ic.*, u_created.username as created_by_username, u_used.username as used_by_username
+            FROM invite_codes ic
+            LEFT JOIN users u_created ON ic.created_by = u_created.id
+            LEFT JOIN users u_used ON ic.used_by = u_used.id
+            WHERE ic.id = ?
+        ");
+        $stmt->execute([$id]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Get all invite codes with pagination
+     */
+    public function getInviteCodes($limit = 50, $offset = 0, $filters = []) {
+        $this->ensureInviteCodesTable();
+
+        $where = [];
+        $params = [];
+
+        if (!empty($filters['status'])) {
+            switch ($filters['status']) {
+                case 'valid':
+                    $where[] = "ic.used_by IS NULL AND ic.expires_at > NOW()";
+                    break;
+                case 'used':
+                    $where[] = "ic.used_by IS NOT NULL";
+                    break;
+                case 'expired':
+                    $where[] = "ic.used_by IS NULL AND ic.expires_at <= NOW()";
+                    break;
+            }
+        }
+
+        if (!empty($filters['created_by'])) {
+            $where[] = "ic.created_by = ?";
+            $params[] = $filters['created_by'];
+        }
+
+        $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
+
+        $stmt = $this->pdo->prepare("
+            SELECT ic.*, u_created.username as created_by_username, u_used.username as used_by_username
+            FROM invite_codes ic
+            LEFT JOIN users u_created ON ic.created_by = u_created.id
+            LEFT JOIN users u_used ON ic.used_by = u_used.id
+            $whereClause
+            ORDER BY ic.created_at DESC
+            LIMIT ? OFFSET ?
+        ");
+
+        $params[] = $limit;
+        $params[] = $offset;
+        $stmt->execute($params);
+
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Get count of invite codes
+     */
+    public function getInviteCodesCount($filters = []) {
+        $this->ensureInviteCodesTable();
+
+        $where = [];
+        $params = [];
+
+        if (!empty($filters['status'])) {
+            switch ($filters['status']) {
+                case 'valid':
+                    $where[] = "used_by IS NULL AND expires_at > NOW()";
+                    break;
+                case 'used':
+                    $where[] = "used_by IS NOT NULL";
+                    break;
+                case 'expired':
+                    $where[] = "used_by IS NULL AND expires_at <= NOW()";
+                    break;
+            }
+        }
+
+        if (!empty($filters['created_by'])) {
+            $where[] = "created_by = ?";
+            $params[] = $filters['created_by'];
+        }
+
+        $whereClause = $where ? "WHERE " . implode(" AND ", $where) : "";
+
+        $stmt = $this->pdo->prepare("SELECT COUNT(*) as count FROM invite_codes $whereClause");
+        $stmt->execute($params);
+
+        return $stmt->fetch()['count'];
+    }
+
+    /**
+     * Validate an invite code for registration
+     * @return array ['valid' => bool, 'error' => string|null, 'invite' => array|null]
+     */
+    public function validateInviteCode($code) {
+        $invite = $this->getInviteCode($code);
+
+        if (!$invite) {
+            return ['valid' => false, 'error' => 'Invalid invite code', 'invite' => null];
+        }
+
+        if ($invite['used_by'] !== null) {
+            return ['valid' => false, 'error' => 'This invite code has already been used', 'invite' => $invite];
+        }
+
+        if (strtotime($invite['expires_at']) < time()) {
+            return ['valid' => false, 'error' => 'This invite code has expired', 'invite' => $invite];
+        }
+
+        return ['valid' => true, 'error' => null, 'invite' => $invite];
+    }
+
+    /**
+     * Use an invite code (mark it as used and create user)
+     * @return array ['success' => bool, 'error' => string|null, 'user' => array|null]
+     */
+    public function useInviteCode($code, $username, $password) {
+        // Validate the code first
+        $validation = $this->validateInviteCode($code);
+        if (!$validation['valid']) {
+            return ['success' => false, 'error' => $validation['error'], 'user' => null];
+        }
+
+        // Check if username is valid
+        if (strlen($username) < 3) {
+            return ['success' => false, 'error' => 'Username must be at least 3 characters', 'user' => null];
+        }
+
+        if (!preg_match('/^[a-zA-Z0-9_]+$/', $username)) {
+            return ['success' => false, 'error' => 'Username can only contain letters, numbers, and underscores', 'user' => null];
+        }
+
+        // Check if username already exists
+        if ($this->getUser($username)) {
+            return ['success' => false, 'error' => 'Username already taken', 'user' => null];
+        }
+
+        // Check password
+        if (strlen($password) < 6) {
+            return ['success' => false, 'error' => 'Password must be at least 6 characters', 'user' => null];
+        }
+
+        // Start transaction
+        $this->pdo->beginTransaction();
+
+        try {
+            // Create the user
+            $user = $this->createUser($username, $password, 'user');
+            if (!$user) {
+                $this->pdo->rollBack();
+                return ['success' => false, 'error' => 'Failed to create user', 'user' => null];
+            }
+
+            // Mark invite code as used
+            $stmt = $this->pdo->prepare("
+                UPDATE invite_codes
+                SET used_by = ?, used_at = NOW()
+                WHERE code = ?
+            ");
+            $stmt->execute([$user['id'], $code]);
+
+            $this->pdo->commit();
+            return ['success' => true, 'error' => null, 'user' => $user];
+
+        } catch (Exception $e) {
+            $this->pdo->rollBack();
+            return ['success' => false, 'error' => 'Registration failed: ' . $e->getMessage(), 'user' => null];
+        }
+    }
+
+    /**
+     * Delete an invite code
+     */
+    public function deleteInviteCode($id) {
+        $this->ensureInviteCodesTable();
+        $stmt = $this->pdo->prepare("DELETE FROM invite_codes WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Delete expired and unused invite codes (cleanup)
+     */
+    public function cleanupExpiredInviteCodes() {
+        $this->ensureInviteCodesTable();
+        $stmt = $this->pdo->prepare("DELETE FROM invite_codes WHERE used_by IS NULL AND expires_at < NOW()");
+        $stmt->execute();
+        return $stmt->rowCount();
+    }
+
+    /**
+     * Get invite code statistics
+     */
+    public function getInviteCodeStats() {
+        $this->ensureInviteCodesTable();
+        $stmt = $this->pdo->query("
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN used_by IS NOT NULL THEN 1 ELSE 0 END) as used,
+                SUM(CASE WHEN used_by IS NULL AND expires_at > NOW() THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN used_by IS NULL AND expires_at <= NOW() THEN 1 ELSE 0 END) as expired
+            FROM invite_codes
+        ");
+        return $stmt->fetch();
+    }
+
+    // =====================
+    // REGRESSION/PROGRESSION TRACKING
+    // =====================
+
+    /**
+     * Get recent regressions from report revisions
+     * A regression is when a test goes from a better status to a worse status
+     * Status priority: Working (3) > Semi-working (2) > Not working (1)
+     *
+     * @param int $limit Maximum number of regressions to return
+     * @return array List of recent regressions with details
+     */
+    public function getRecentRegressions($limit = 10) {
+        $regressions = [];
+
+        // Get recent revisions that have changes_diff
+        $stmt = $this->pdo->prepare("
+            SELECT rr.*, r.client_version, r.tester, r.test_type, r.commit_hash
+            FROM report_revisions rr
+            JOIN reports r ON rr.report_id = r.id
+            WHERE rr.changes_diff IS NOT NULL
+            ORDER BY rr.archived_at DESC
+            LIMIT ?
+        ");
+        $stmt->execute([$limit * 5]); // Get more than needed since not all may have regressions
+        $revisions = $stmt->fetchAll();
+
+        $statusPriority = [
+            'Working' => 3,
+            'Semi-working' => 2,
+            'Not working' => 1,
+            'N/A' => 0,
+            '' => 0
+        ];
+
+        foreach ($revisions as $revision) {
+            $diff = json_decode($revision['changes_diff'], true);
+            if (!$diff || empty($diff['changed'])) {
+                continue;
+            }
+
+            foreach ($diff['changed'] as $change) {
+                $oldPriority = $statusPriority[$change['old_status']] ?? 0;
+                $newPriority = $statusPriority[$change['new_status']] ?? 0;
+
+                // Regression: new status is worse (lower priority) than old status
+                if ($newPriority < $oldPriority && $newPriority > 0) {
+                    $regressions[] = [
+                        'report_id' => $revision['report_id'],
+                        'revision_number' => $revision['revision_number'],
+                        'test_key' => $change['test_key'],
+                        'old_status' => $change['old_status'],
+                        'new_status' => $change['new_status'],
+                        'client_version' => $revision['client_version'],
+                        'tester' => $revision['tester'],
+                        'commit_hash' => $revision['commit_hash'],
+                        'archived_at' => $revision['archived_at']
+                    ];
+
+                    if (count($regressions) >= $limit) {
+                        break 2;
+                    }
+                }
+            }
+        }
+
+        return $regressions;
+    }
+
+    /**
+     * Get recent progressions from report revisions
+     * A progression is when a test goes from a worse status to a better status
+     *
+     * @param int $limit Maximum number of progressions to return
+     * @return array List of recent progressions with details
+     */
+    public function getRecentProgressions($limit = 10) {
+        $progressions = [];
+
+        // Get recent revisions that have changes_diff
+        $stmt = $this->pdo->prepare("
+            SELECT rr.*, r.client_version, r.tester, r.test_type, r.commit_hash
+            FROM report_revisions rr
+            JOIN reports r ON rr.report_id = r.id
+            WHERE rr.changes_diff IS NOT NULL
+            ORDER BY rr.archived_at DESC
+            LIMIT ?
+        ");
+        $stmt->execute([$limit * 5]);
+        $revisions = $stmt->fetchAll();
+
+        $statusPriority = [
+            'Working' => 3,
+            'Semi-working' => 2,
+            'Not working' => 1,
+            'N/A' => 0,
+            '' => 0
+        ];
+
+        foreach ($revisions as $revision) {
+            $diff = json_decode($revision['changes_diff'], true);
+            if (!$diff || empty($diff['changed'])) {
+                continue;
+            }
+
+            foreach ($diff['changed'] as $change) {
+                $oldPriority = $statusPriority[$change['old_status']] ?? 0;
+                $newPriority = $statusPriority[$change['new_status']] ?? 0;
+
+                // Progression: new status is better (higher priority) than old status
+                // Only count if old status was a real status (not N/A)
+                if ($newPriority > $oldPriority && $oldPriority > 0) {
+                    $progressions[] = [
+                        'report_id' => $revision['report_id'],
+                        'revision_number' => $revision['revision_number'],
+                        'test_key' => $change['test_key'],
+                        'old_status' => $change['old_status'],
+                        'new_status' => $change['new_status'],
+                        'client_version' => $revision['client_version'],
+                        'tester' => $revision['tester'],
+                        'commit_hash' => $revision['commit_hash'],
+                        'archived_at' => $revision['archived_at']
+                    ];
+
+                    if (count($progressions) >= $limit) {
+                        break 2;
+                    }
+                }
+            }
+        }
+
+        return $progressions;
+    }
+
+    /**
+     * Detect regressions in new test results compared to previous results
+     * Used when submitting reports to create notifications
+     *
+     * @param array $oldResults Previous test results (from archived revision)
+     * @param array $newResults New test results being submitted
+     * @return array List of regressions found
+     */
+    public function detectRegressions($oldResults, $newResults) {
+        $regressions = [];
+
+        $statusPriority = [
+            'Working' => 3,
+            'Semi-working' => 2,
+            'Not working' => 1,
+            'N/A' => 0,
+            '' => 0
+        ];
+
+        // Index old results by test_key
+        $oldByKey = [];
+        foreach ($oldResults as $result) {
+            $key = $result['test_key'] ?? $result['key'] ?? null;
+            if ($key) {
+                $oldByKey[$key] = $result;
+            }
+        }
+
+        // Check each new result against old
+        foreach ($newResults as $result) {
+            $key = $result['test_key'] ?? $result['key'] ?? null;
+            if (!$key) continue;
+
+            $newStatus = $result['status'] ?? '';
+            $oldStatus = isset($oldByKey[$key]) ? ($oldByKey[$key]['status'] ?? '') : '';
+
+            $oldPriority = $statusPriority[$oldStatus] ?? 0;
+            $newPriority = $statusPriority[$newStatus] ?? 0;
+
+            // Regression: new status is worse (lower priority) and both are real statuses
+            if ($newPriority < $oldPriority && $newPriority > 0 && $oldPriority > 0) {
+                $regressions[] = [
+                    'test_key' => $key,
+                    'old_status' => $oldStatus,
+                    'new_status' => $newStatus
+                ];
+            }
+        }
+
+        return $regressions;
+    }
+
+    /**
+     * Create regression notifications for detected regressions
+     *
+     * @param int $reportId Report ID
+     * @param string $clientVersion Client version
+     * @param string $tester Tester name
+     * @param array $regressions List of regressions detected
+     * @return int Number of notifications created
+     */
+    public function createRegressionNotifications($reportId, $clientVersion, $tester, $regressions) {
+        $count = 0;
+
+        foreach ($regressions as $regression) {
+            $testKey = $regression['test_key'];
+            $oldStatus = $regression['old_status'];
+            $newStatus = $regression['new_status'];
+
+            // Create notification for each admin
+            $admins = $this->pdo->query("SELECT id FROM users WHERE role = 'admin'")->fetchAll();
+            foreach ($admins as $admin) {
+                try {
+                    $stmt = $this->pdo->prepare("
+                        INSERT INTO user_notifications (user_id, type, report_id, test_key, client_version, title, message)
+                        VALUES (?, 'regression', ?, ?, ?, ?, ?)
+                    ");
+                    $stmt->execute([
+                        $admin['id'],
+                        $reportId,
+                        $testKey,
+                        $clientVersion,
+                        "Regression: Test $testKey",
+                        "Test $testKey regressed from '$oldStatus' to '$newStatus' in $clientVersion (by $tester)"
+                    ]);
+                    $count++;
+                } catch (PDOException $e) {
+                    // Notification table may not have all columns, ignore
+                }
+            }
+        }
+
+        return $count;
     }
 }
 

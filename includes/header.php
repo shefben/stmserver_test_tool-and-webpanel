@@ -57,6 +57,7 @@ if (!isset($user['role'])) {
                     <a href="?page=submit" class="<?= $currentPage === 'submit' ? 'active' : '' ?>">Submit</a>
                     <a href="?page=my_reports" class="<?= $currentPage === 'my_reports' ? 'active' : '' ?>">My Reports</a>
                     <a href="?page=versions" class="<?= $currentPage === 'versions' ? 'active' : '' ?>">Versions</a>
+                    <a href="?page=compare_versions" class="<?= $currentPage === 'compare_versions' ? 'active' : '' ?>">Compare</a>
                     <a href="?page=repo_revisions" class="<?= $currentPage === 'repo_revisions' ? 'active' : '' ?>">Commits</a>
                     <a href="?page=git_revisions" class="<?= in_array($currentPage, ['git_revisions', 'git_revision_detail']) ? 'active' : '' ?>">Git History</a>
                     <a href="?page=tests" class="<?= $currentPage === 'tests' ? 'active' : '' ?>">Tests</a>
@@ -65,6 +66,16 @@ if (!isset($user['role'])) {
                         <a href="?page=admin" class="<?= in_array($currentPage, ['admin', 'admin_users', 'admin_reports']) ? 'active' : '' ?> admin-link">Admin</a>
                     <?php endif; ?>
                 </nav>
+
+                <div class="global-search">
+                    <button type="button" class="search-toggle" onclick="openGlobalSearch()" title="Search (Ctrl+K)">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+                        </svg>
+                        <span>Search</span>
+                        <kbd>Ctrl+K</kbd>
+                    </button>
+                </div>
 
                 <div class="user-info">
                     <a href="?page=notifications" class="notification-bell" title="Notifications">

@@ -20,6 +20,7 @@ $filterTester = $_GET['tester'] ?? '';
 $filterCommit = $_GET['commit'] ?? '';
 $filterSteamuiVersion = $_GET['steamui'] ?? '';
 $filterSteamPkgVersion = $_GET['steampkg'] ?? '';
+$filterTag = $_GET['tag'] ?? '';
 
 // Build filter array
 $filters = [];
@@ -29,6 +30,7 @@ if ($filterTester) $filters['tester'] = $filterTester;
 if ($filterCommit) $filters['commit_hash'] = $filterCommit;
 if ($filterSteamuiVersion) $filters['steamui_version'] = $filterSteamuiVersion;
 if ($filterSteamPkgVersion) $filters['steam_pkg_version'] = $filterSteamPkgVersion;
+if ($filterTag) $filters['tag_id'] = intval($filterTag);
 
 // Get reports
 $reports = $db->getReports($perPage, $offset, $filters);
@@ -41,6 +43,18 @@ $testers = $db->getUniqueValues('reports', 'tester');
 $commits = $db->getUniqueValues('reports', 'commit_hash');
 $steamuiVersions = $db->getUniqueValues('reports', 'steamui_version');
 $steamPkgVersions = $db->getUniqueValues('reports', 'steam_pkg_version');
+
+// Get all tags for filter dropdown
+$allTags = $db->getAllTags();
+
+// Get tags for all displayed reports in one query
+$reportIds = array_column($reports, 'id');
+$reportTagsMap = [];
+if (!empty($reportIds)) {
+    foreach ($reportIds as $rid) {
+        $reportTagsMap[$rid] = $db->getReportTags($rid);
+    }
+}
 ?>
 
 <h1 class="page-title">Reports</h1>
@@ -119,8 +133,20 @@ $steamPkgVersions = $db->getUniqueValues('reports', 'steam_pkg_version');
             </select>
         </div>
 
+        <div class="form-group" style="margin-bottom: 0; flex: 1; min-width: 150px;">
+            <label>Tag</label>
+            <select name="tag">
+                <option value="">All Tags</option>
+                <?php foreach ($allTags as $tag): ?>
+                    <option value="<?= $tag['id'] ?>" <?= $filterTag == $tag['id'] ? 'selected' : '' ?>>
+                        <?= e($tag['name']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+
         <button type="submit" class="btn btn-sm">Filter</button>
-        <?php if ($filterVersion || $filterType || $filterTester || $filterCommit || $filterSteamuiVersion || $filterSteamPkgVersion): ?>
+        <?php if ($filterVersion || $filterType || $filterTester || $filterCommit || $filterSteamuiVersion || $filterSteamPkgVersion || $filterTag): ?>
             <a href="?page=reports" class="btn btn-sm btn-secondary">Clear</a>
         <?php endif; ?>
     </form>
@@ -166,15 +192,27 @@ $steamPkgVersions = $db->getUniqueValues('reports', 'steam_pkg_version');
                         <?php
                         $reportStats = $db->getReportStats($report['id']);
                         ?>
+                        <?php $tags = $reportTagsMap[$report['id']] ?? []; ?>
                         <tr class="clickable-row" onclick="window.location='?page=report_detail&id=<?= $report['id'] ?>'">
                             <td>
-                                <a href="?page=report_detail&id=<?= $report['id'] ?>" class="report-id-link" onclick="event.stopPropagation();">
-                                    #<?= $report['id'] ?>
-                                </a>
-                                <?php if (($report['revision_count'] ?? 0) > 0): ?>
-                                    <a href="?page=report_revisions&id=<?= $report['id'] ?>" class="revision-badge-small" onclick="event.stopPropagation();" title="<?= $report['revision_count'] ?> revision(s)">
-                                        v<?= ($report['revision_count'] ?? 0) + 1 ?>
+                                <div class="report-id-cell">
+                                    <a href="?page=report_detail&id=<?= $report['id'] ?>" class="report-id-link" onclick="event.stopPropagation();">
+                                        #<?= $report['id'] ?>
                                     </a>
+                                    <?php if (($report['revision_count'] ?? 0) > 0): ?>
+                                        <a href="?page=report_revisions&id=<?= $report['id'] ?>" class="revision-badge-small" onclick="event.stopPropagation();" title="<?= $report['revision_count'] ?> revision(s)">
+                                            v<?= ($report['revision_count'] ?? 0) + 1 ?>
+                                        </a>
+                                    <?php endif; ?>
+                                </div>
+                                <?php if (!empty($tags)): ?>
+                                    <div class="report-tags-inline">
+                                        <?php foreach ($tags as $tag): ?>
+                                            <a href="?page=reports&tag=<?= $tag['id'] ?>" class="tag-mini" style="background-color: <?= e($tag['color']) ?>;" onclick="event.stopPropagation();" title="<?= e($tag['name']) ?>">
+                                                <?= e($tag['name']) ?>
+                                            </a>
+                                        <?php endforeach; ?>
+                                    </div>
                                 <?php endif; ?>
                             </td>
                             <td>
@@ -285,6 +323,7 @@ $steamPkgVersions = $db->getUniqueValues('reports', 'steam_pkg_version');
             'commit' => $filterCommit,
             'steamui' => $filterSteamuiVersion,
             'steampkg' => $filterSteamPkgVersion,
+            'tag' => $filterTag,
         ]));
         ?>
         <div class="pagination">
@@ -462,6 +501,39 @@ $steamPkgVersions = $db->getUniqueValues('reports', 'steam_pkg_version');
 .revision-link:hover {
     background: var(--primary);
     color: #fff;
+}
+
+/* Report ID cell with tags */
+.report-id-cell {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+/* Tags inline display */
+.report-tags-inline {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+}
+
+.tag-mini {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 9px;
+    font-weight: 600;
+    color: #fff;
+    text-shadow: 0 1px 1px rgba(0,0,0,0.3);
+    text-decoration: none;
+    transition: all 0.15s;
+    white-space: nowrap;
+}
+
+.tag-mini:hover {
+    transform: scale(1.1);
+    box-shadow: 0 2px 5px rgba(0,0,0,0.3);
 }
 </style>
 

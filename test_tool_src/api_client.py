@@ -140,6 +140,69 @@ class TestsResult:
 
 
 @dataclass
+class VersionNotification:
+    """Represents a notification/known issue for a client version."""
+    id: int
+    name: str
+    message: str
+    commit_hash: Optional[str] = None
+    created_at: Optional[str] = None
+    created_by: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'VersionNotification':
+        return cls(
+            id=data.get('id', 0),
+            name=data.get('name', ''),
+            message=data.get('message', ''),
+            commit_hash=data.get('commit_hash'),
+            created_at=data.get('created_at'),
+            created_by=data.get('created_by')
+        )
+
+
+@dataclass
+class ClientVersion:
+    """Represents a client version from the API."""
+    id: str  # version_id string
+    packages: List[str] = field(default_factory=list)
+    steam_date: Optional[str] = None
+    steam_time: Optional[str] = None
+    skip_tests: List[str] = field(default_factory=list)
+    display_name: Optional[str] = None
+    sort_order: int = 0
+    is_enabled: bool = True
+    notifications: List[VersionNotification] = field(default_factory=list)
+    notification_count: int = 0
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'ClientVersion':
+        notifications = []
+        if 'notifications' in data:
+            notifications = [VersionNotification.from_dict(n) for n in data.get('notifications', [])]
+        return cls(
+            id=data.get('id', ''),
+            packages=data.get('packages', []),
+            steam_date=data.get('steam_date'),
+            steam_time=data.get('steam_time'),
+            skip_tests=data.get('skip_tests', []),
+            display_name=data.get('display_name'),
+            sort_order=data.get('sort_order', 0),
+            is_enabled=data.get('is_enabled', True),
+            notifications=notifications,
+            notification_count=data.get('notification_count', len(notifications))
+        )
+
+
+@dataclass
+class VersionsResult:
+    """Result of fetching client versions from the API."""
+    success: bool
+    versions: List[ClientVersion] = field(default_factory=list)
+    error: Optional[str] = None
+
+
+@dataclass
 class RetestItem:
     """Represents a retest queue item."""
     type: str  # 'retest' or 'fixed'
@@ -583,6 +646,111 @@ class TestPanelClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching tests: {e}")
             return TestsResult(success=False, error=str(e))
+
+    def get_versions(self, enabled_only: bool = True, include_notifications: bool = False) -> VersionsResult:
+        """
+        Get client versions from the API.
+
+        Args:
+            enabled_only: If True, only return enabled versions
+            include_notifications: If True, include notifications for each version
+
+        Returns:
+            VersionsResult with list of ClientVersion objects
+        """
+        params = {}
+        if not enabled_only:
+            params['all'] = '1'
+        if include_notifications:
+            params['notifications'] = '1'
+
+        try:
+            response = self._make_request('GET', '/api/versions.php', params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    versions = [ClientVersion.from_dict(v) for v in data.get('versions', [])]
+                    return VersionsResult(
+                        success=True,
+                        versions=versions
+                    )
+
+            logger.warning(f"Failed to get versions: HTTP {response.status_code}")
+            return VersionsResult(success=False, error=f"HTTP {response.status_code}")
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching versions: {e}")
+            return VersionsResult(success=False, error=str(e))
+
+    def get_version_notifications(self, version_id: str, commit_hash: Optional[str] = None) -> List[VersionNotification]:
+        """
+        Get notifications/known issues for a specific client version.
+
+        Args:
+            version_id: The client version ID string
+            commit_hash: Optional commit hash to filter notifications
+
+        Returns:
+            List of VersionNotification objects (oldest first, for stacking)
+        """
+        try:
+            data = {
+                'action': 'get_notifications',
+                'version_id': version_id
+            }
+            if commit_hash:
+                data['commit_hash'] = commit_hash
+
+            response = self._make_request('POST', '/api/versions.php', data=data)
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    return [VersionNotification.from_dict(n) for n in result.get('notifications', [])]
+
+            logger.warning(f"Failed to get version notifications: HTTP {response.status_code}")
+            return []
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching version notifications: {e}")
+            return []
+
+    def get_notifications_batch(self, version_ids: List[str], commit_hash: Optional[str] = None) -> Dict[str, List[VersionNotification]]:
+        """
+        Get notifications for multiple versions at once.
+
+        Args:
+            version_ids: List of version ID strings
+            commit_hash: Optional commit hash to filter notifications
+
+        Returns:
+            Dict mapping version_id to list of VersionNotification objects
+        """
+        try:
+            data = {
+                'action': 'get_notifications_batch',
+                'version_ids': version_ids
+            }
+            if commit_hash:
+                data['commit_hash'] = commit_hash
+
+            response = self._make_request('POST', '/api/versions.php', data=data)
+
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    notifications_by_version = {}
+                    for version_id, notifs in result.get('notifications_by_version', {}).items():
+                        notifications_by_version[version_id] = [VersionNotification.from_dict(n) for n in notifs]
+                    return notifications_by_version
+
+            logger.warning(f"Failed to get batch notifications: HTTP {response.status_code}")
+            return {}
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching batch notifications: {e}")
+            return {}
 
     def get_user_info(self) -> UserInfo:
         """

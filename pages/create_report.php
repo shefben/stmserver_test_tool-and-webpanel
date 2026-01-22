@@ -111,6 +111,29 @@ try {
     $categories = getTestCategories();
 }
 
+// Get templates for the template selector
+$templates = [];
+try {
+    $templates = $db->getTestTemplates();
+} catch (Exception $e) {
+    // Templates table may not exist yet
+}
+$defaultTemplate = null;
+foreach ($templates as $t) {
+    if ($t['is_default']) {
+        $defaultTemplate = $t;
+        break;
+    }
+}
+
+// Get client versions for version-based template matching
+$clientVersions = [];
+try {
+    $clientVersions = $db->getClientVersions();
+} catch (Exception $e) {
+    // Client versions table may not exist
+}
+
 // Fetch latest GitHub revisions (this will update the cache if needed)
 $revisionOptions = [];
 $revisionsData = [];
@@ -211,6 +234,68 @@ if (isGitHubConfigured()) {
             </div>
         </div>
     </div>
+
+    <!-- Template Selection -->
+    <?php if (!empty($templates)): ?>
+    <div class="card" style="margin-bottom: 30px;">
+        <h3 class="card-title" style="display: flex; align-items: center; gap: 10px;">
+            <span style="font-size: 20px;">📋</span>
+            Test Template
+        </h3>
+        <p style="color: var(--text-muted); margin-bottom: 15px;">
+            Apply a template to quickly set up tests. Tests in the template will be set to the specified default status,
+            and tests NOT in the template will be set to N/A.
+        </p>
+
+        <div class="form-row">
+            <div class="form-group" style="flex: 2;">
+                <label>Select Template</label>
+                <select id="template_select" onchange="onTemplateChange()">
+                    <option value="">-- No template (manual entry) --</option>
+                    <?php foreach ($templates as $template): ?>
+                        <option value="<?= $template['id'] ?>"
+                                data-test-keys="<?= e(json_encode($template['test_keys'])) ?>"
+                                <?= $template['is_default'] ? 'data-default="1"' : '' ?>>
+                            <?= e($template['name']) ?>
+                            <?php if ($template['is_default']): ?> (Default)<?php endif; ?>
+                            <?php if ($template['is_system']): ?> [System]<?php endif; ?>
+                            (<?= count($template['test_keys']) ?> tests)
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+            <div class="form-group" style="flex: 1;">
+                <label>Default Status for Template Tests</label>
+                <select id="template_default_status">
+                    <option value="Working">Working</option>
+                    <option value="Semi-working">Semi-working</option>
+                    <option value="Not working">Not working</option>
+                    <option value="">No change (keep current)</option>
+                </select>
+            </div>
+            <div class="form-group" style="flex: 0 0 auto; display: flex; align-items: flex-end;">
+                <button type="button" class="btn btn-secondary" onclick="applyTemplate()" id="apply_template_btn" disabled>
+                    Apply Template
+                </button>
+            </div>
+        </div>
+
+        <div id="template_description" style="margin-top: 10px; padding: 10px; background: var(--bg-accent); border-radius: 4px; display: none;">
+            <strong>Template:</strong> <span id="template_name"></span><br>
+            <span id="template_desc" style="color: var(--text-muted);"></span>
+        </div>
+
+        <!-- Version-based skip tests (auto-applies when version is entered) -->
+        <?php if (!empty($clientVersions)): ?>
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border);">
+            <p style="color: var(--text-muted); font-size: 13px;">
+                <strong>💡 Tip:</strong> Some client versions have pre-configured skip tests. When you enter a matching
+                client version above, tests that are known to be N/A for that version will be automatically marked.
+            </p>
+        </div>
+        <?php endif; ?>
+    </div>
+    <?php endif; ?>
 
     <!-- Log Files Note -->
     <div class="card" style="margin-bottom: 30px;">
@@ -399,6 +484,146 @@ function setAllStatus(status) {
         select.className = 'status-select ' + status.toLowerCase().replace(' ', '-');
     });
 }
+
+// ==================== Template Functions ====================
+
+// Template data from PHP
+var templatesData = <?= json_encode(array_map(function($t) {
+    return [
+        'id' => $t['id'],
+        'name' => $t['name'],
+        'description' => $t['description'],
+        'test_keys' => $t['test_keys'],
+        'is_default' => $t['is_default']
+    ];
+}, $templates)) ?>;
+
+// Client version skip tests data
+var clientVersionsData = <?= json_encode(array_map(function($v) {
+    return [
+        'id' => $v['id'],
+        'version_id' => $v['version_id'],
+        'skip_tests' => json_decode($v['skip_tests'] ?? '[]', true) ?: []
+    ];
+}, $clientVersions)) ?>;
+
+// Handle template selection change
+function onTemplateChange() {
+    var select = document.getElementById('template_select');
+    var applyBtn = document.getElementById('apply_template_btn');
+    var descDiv = document.getElementById('template_description');
+
+    if (select.value) {
+        applyBtn.disabled = false;
+        // Find template data
+        var template = templatesData.find(t => t.id == select.value);
+        if (template) {
+            document.getElementById('template_name').textContent = template.name;
+            document.getElementById('template_desc').textContent = template.description || 'No description';
+            descDiv.style.display = 'block';
+        }
+    } else {
+        applyBtn.disabled = true;
+        descDiv.style.display = 'none';
+    }
+}
+
+// Apply selected template
+function applyTemplate() {
+    var select = document.getElementById('template_select');
+    var defaultStatus = document.getElementById('template_default_status').value;
+
+    if (!select.value) {
+        alert('Please select a template first.');
+        return;
+    }
+
+    // Find template data
+    var template = templatesData.find(t => t.id == select.value);
+    if (!template) {
+        alert('Template not found.');
+        return;
+    }
+
+    var testKeys = template.test_keys || [];
+    var testKeysSet = new Set(testKeys);
+    var applied = 0;
+    var skipped = 0;
+
+    // Apply to all status selects
+    document.querySelectorAll('.status-select').forEach(select => {
+        // Extract test key from the select name: status[test_key]
+        var match = select.name.match(/status\[([^\]]+)\]/);
+        if (!match) return;
+
+        var testKey = match[1];
+
+        if (testKeysSet.has(testKey)) {
+            // Test is in template - set to default status (if specified)
+            if (defaultStatus) {
+                select.value = defaultStatus;
+                select.className = 'status-select ' + defaultStatus.toLowerCase().replace(' ', '-');
+            }
+            applied++;
+        } else {
+            // Test is NOT in template - set to N/A
+            select.value = 'N/A';
+            select.className = 'status-select n/a';
+            skipped++;
+        }
+    });
+
+    alert('Template applied!\n\n' + applied + ' tests set to "' + (defaultStatus || 'unchanged') + '"\n' + skipped + ' tests set to "N/A"');
+}
+
+// Apply version-based skip tests when client version changes
+function applyVersionSkipTests() {
+    var versionInput = document.querySelector('input[name="client_version"]');
+    if (!versionInput) return;
+
+    var version = versionInput.value.trim();
+    if (!version) return;
+
+    // Find matching client version
+    var clientVersion = clientVersionsData.find(v =>
+        v.version_id === version || v.version_id.includes(version) || version.includes(v.version_id)
+    );
+
+    if (!clientVersion || !clientVersion.skip_tests || clientVersion.skip_tests.length === 0) {
+        return;
+    }
+
+    var skipTests = new Set(clientVersion.skip_tests);
+    var skipped = 0;
+
+    document.querySelectorAll('.status-select').forEach(select => {
+        var match = select.name.match(/status\[([^\]]+)\]/);
+        if (!match) return;
+
+        var testKey = match[1];
+        if (skipTests.has(testKey)) {
+            select.value = 'N/A';
+            select.className = 'status-select n/a';
+            skipped++;
+        }
+    });
+
+    if (skipped > 0) {
+        console.log('Auto-skipped ' + skipped + ' tests for version: ' + version);
+    }
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Add change listener to client version input for auto-skip
+    var versionInput = document.querySelector('input[name="client_version"]');
+    if (versionInput) {
+        versionInput.addEventListener('blur', applyVersionSkipTests);
+    }
+
+    // Initialize template selector state
+    onTemplateChange();
+});
 
 // Revision data from PHP
 var revisionsData = <?= json_encode($revisionsData) ?>;

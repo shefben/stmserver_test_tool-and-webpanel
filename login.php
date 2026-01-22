@@ -180,6 +180,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             border: 1px solid var(--border);
         }
 
+        .register-link {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border);
+            font-size: 14px;
+            color: var(--text-muted);
+        }
+
+        .register-link a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+
+        .register-link a:hover {
+            text-decoration: underline;
+        }
+
         /* Steam-like decorative element */
         .steam-line {
             height: 3px;
@@ -219,6 +237,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <strong>Default credentials:</strong><br>
             Username: <code>admin</code><br>
             Password: <code>steamtest2024</code>
+        </div>
+
+        <div class="register-link">
+            Don't have an account? <a href="register.php">Register with invite code</a>
         </div>
     </div>
 </body>

@@ -60,6 +60,7 @@ The desktop application (built with PyQt5) provides:
 - **Offline Mode**: Continue testing even without server connectivity
 - **Session Management**: Save and resume testing sessions
 - **Revision Selection**: Choose which emulator commit you're testing against
+- **Keyboard Shortcuts**: Rapid test completion with keyboard-driven workflow
 
 ## Key Features
 
@@ -86,6 +87,31 @@ The desktop application (built with PyQt5) provides:
 - Notification system for important updates
 - Comment system on reports
 - Role-based access (admin/user)
+
+### Regression & Progression Tracking
+- **Dashboard Widgets**: Real-time display of recent regressions and progressions
+- **Automatic Detection**: System detects when tests change status between submissions
+- **Notifications**: Admins receive notifications when regressions occur
+- **Version Comparison**: Compare any two versions side-by-side to see changes
+- **Change History**: Full revision history with diffs for each report
+
+### Global Search
+- **Unified Search**: Search across reports, tests, versions, testers, and notes
+- **Keyboard Shortcut**: Press `Ctrl+K` to open search from anywhere
+- **Category Grouping**: Results organized by type for quick navigation
+- **Full-Text Search**: Search within test notes and comments
+
+### Test Templates
+- **Predefined Templates**: Apply test configurations quickly
+- **Version-Based Matching**: Auto-skip tests known to be N/A for specific versions
+- **Customizable**: Create and manage templates through the admin panel
+- **Default Status**: Set default status when applying templates
+
+### Tagging System
+- **Report Tags**: Label reports with custom tags (e.g., "regression", "verified", "needs-review")
+- **Color-Coded**: Visual tag badges with customizable colors
+- **Filter by Tag**: Quickly find reports with specific tags
+- **Admin Managed**: Tag vocabulary controlled by administrators
 
 ## Installation
 
@@ -129,6 +155,45 @@ The desktop application (built with PyQt5) provides:
 3. Review and moderate submitted reports
 4. Monitor overall testing progress
 
+## Python Tool Keyboard Shortcuts
+
+The desktop testing tool supports comprehensive keyboard shortcuts for efficient testing:
+
+### Test Status (Tests Page)
+| Shortcut | Action |
+|----------|--------|
+| `1` | Set status: Working (then advance to next test) |
+| `2` | Set status: Semi-working (then advance) |
+| `3` | Set status: Not working (then advance) |
+| `4` | Set status: N/A (then advance) |
+| `Ctrl+Down` | Next test |
+| `Ctrl+Up` | Previous test |
+| `Ctrl+Enter` | Next test (alternate) |
+| `Ctrl+N` | Focus notes field |
+
+### Navigation
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+1` | Go to Intro page |
+| `Ctrl+2` | Go to Versions page |
+| `Ctrl+3` | Go to Tests page |
+| `Escape` | Go back |
+| `Alt+Up/Down` | Navigate versions list |
+
+### Session & Reports
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+S` | Save session |
+| `Ctrl+R` | Reload session |
+| `Ctrl+E` | Export HTML report |
+| `Ctrl+U` | Upload to panel |
+| `Ctrl+T` | Check retests |
+| `Ctrl+F` | Finish current test |
+| `Ctrl+L` | Attach log files |
+| `Ctrl+Space` | Toggle stopwatch |
+| `F5` | Refresh current view |
+| `F1` | Show keyboard shortcuts help |
+
 ## API Documentation
 
 The API uses API key authentication via the `X-API-Key` header.
@@ -136,10 +201,12 @@ The API uses API key authentication via the `X-API-Key` header.
 ### Key Endpoints
 
 - `GET /api/user.php` - Get current user info and available revisions
-- `POST /api/submit.php` - Submit a test report
+- `POST /api/submit.php` - Submit a test report (includes regression detection)
 - `GET /api/reports.php` - List reports with filtering
 - `GET /api/tests.php` - Get available test definitions
 - `GET /api/revisions.php` - Get GitHub commit history
+- `GET /api/search.php` - Global search across all data
+- `GET/POST /api/report_tags.php` - Manage report tags
 
 ## Credits
 

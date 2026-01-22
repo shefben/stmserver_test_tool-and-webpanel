@@ -17,6 +17,7 @@ $users = $db->getUsers();
 $recentReports = $db->getReports(5);
 $pendingRetests = count($db->getRetestRequests('pending'));
 $pendingFixed = count($db->getFixedTests('pending_retest'));
+$inviteStats = $db->getInviteCodeStats();
 
 // Get test types count
 $testTypesCount = 0;
@@ -48,6 +49,11 @@ try {
         <div class="label">Users</div>
         <div class="card-hint">Manage users</div>
     </a>
+    <a href="?page=admin_invites" class="stat-card clickable-card" style="border-left: 4px solid #9b59b6;">
+        <div class="value" style="color: #9b59b6;"><?= $inviteStats['valid'] ?? 0 ?></div>
+        <div class="label">Active Invites</div>
+        <div class="card-hint">Manage invite codes</div>
+    </a>
     <a href="?page=admin_retests" class="stat-card clickable-card" style="border-left: 4px solid var(--status-semi);">
         <div class="value" style="color: var(--status-semi);"><?= $pendingRetests + $pendingFixed ?></div>
         <div class="label">Pending Retests</div>
@@ -70,6 +76,11 @@ try {
                 <span class="action-text">Manage Users</span>
                 <span class="action-desc">Create, edit, and manage user accounts</span>
             </a>
+            <a href="?page=admin_invites" class="admin-action-btn">
+                <span class="action-icon">&#128231;</span>
+                <span class="action-text">Invite Codes</span>
+                <span class="action-desc">Create and manage registration invites</span>
+            </a>
             <a href="?page=admin_reports" class="admin-action-btn">
                 <span class="action-icon">&#128196;</span>
                 <span class="action-text">Manage Reports</span>
@@ -84,6 +95,26 @@ try {
                 <span class="action-icon">&#9881;</span>
                 <span class="action-text">Manage Tests</span>
                 <span class="action-desc">Categories and test type definitions</span>
+            </a>
+            <a href="?page=admin_templates" class="admin-action-btn">
+                <span class="action-icon">&#128203;</span>
+                <span class="action-text">Test Templates</span>
+                <span class="action-desc">Create and manage test presets</span>
+            </a>
+            <a href="?page=admin_tags" class="admin-action-btn">
+                <span class="action-icon">&#127991;</span>
+                <span class="action-text">Report Tags</span>
+                <span class="action-desc">Manage labels for organizing reports</span>
+            </a>
+            <a href="?page=admin_versions" class="admin-action-btn">
+                <span class="action-icon">&#128230;</span>
+                <span class="action-text">Client Versions</span>
+                <span class="action-desc">Manage Steam client versions for testing</span>
+            </a>
+            <a href="?page=admin_version_notifications" class="admin-action-btn">
+                <span class="action-icon">&#128227;</span>
+                <span class="action-text">Version Notifications</span>
+                <span class="action-desc">Known issues and notes for client versions</span>
             </a>
             <a href="?page=submit" class="admin-action-btn">
                 <span class="action-icon">&#128228;</span>
