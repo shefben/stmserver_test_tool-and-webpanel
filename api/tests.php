@@ -25,6 +25,22 @@ $method = $_SERVER['REQUEST_METHOD'];
 // GET - Get all test types grouped by category
 if ($method === 'GET') {
     $enabledOnly = !isset($_GET['all']); // By default only enabled tests
+    $clientVersion = $_GET['client_version'] ?? null; // Optional: filter by version-specific template
+
+    // Get version-specific template if client_version provided
+    $templateTestKeys = null;
+    $templateInfo = null;
+    if ($clientVersion) {
+        $template = $db->getTemplateForVersionString($clientVersion);
+        if ($template && !empty($template['test_keys'])) {
+            $templateTestKeys = $template['test_keys'];
+            $templateInfo = [
+                'id' => $template['id'],
+                'name' => $template['name'],
+                'is_default' => (bool)$template['is_default']
+            ];
+        }
+    }
 
     // Try to get tests from database first
     $tests = [];
@@ -109,6 +125,14 @@ if ($method === 'GET') {
         }
     }
 
+    // Filter tests by template if version-specific template is active
+    if ($templateTestKeys !== null) {
+        $tests = array_filter($tests, function($test) use ($templateTestKeys) {
+            return in_array($test['test_key'], $templateTestKeys);
+        });
+        $tests = array_values($tests); // Re-index array
+    }
+
     // Group tests by category for convenience
     $grouped = [];
     foreach ($tests as $test) {
@@ -119,14 +143,21 @@ if ($method === 'GET') {
         $grouped[$catName][] = $test;
     }
 
-    echo json_encode([
+    $response = [
         'success' => true,
         'categories' => $categories,
         'tests' => $tests,
         'grouped' => $grouped,
         'total_tests' => count($tests),
         'total_categories' => count($categories)
-    ]);
+    ];
+
+    // Include template info if a version-specific template was applied
+    if ($templateInfo !== null) {
+        $response['template'] = $templateInfo;
+    }
+
+    echo json_encode($response);
     exit;
 }
 

@@ -1253,8 +1253,19 @@ class TestPage(QWidget):
         self.entries = []
         self.test_frames = []  # Reset frame references
         self.current_test_index = 0  # Reset current test index
-        skip = set(version.get('skip_tests', []))
-        for tnum, tname, tdesc in TESTS:
+
+        # Try to get version-specific tests from API (uses version-specific template if assigned)
+        version_tests = self.controller.get_tests_for_version(version['id'])
+        if version_tests is not None:
+            # Use version-specific tests (template already filters the tests)
+            tests_to_show = version_tests
+            skip = set()  # No additional skip needed, template already filtered
+        else:
+            # Fall back to global TESTS with skip_tests filtering
+            tests_to_show = TESTS
+            skip = set(version.get('skip_tests', []))
+
+        for tnum, tname, tdesc in tests_to_show:
             if tnum in skip:
                 continue
             frame = QFrame()
@@ -1811,6 +1822,36 @@ class Controller:
     def get_tests_list(self):
         """Get the current tests list (from API or fallback)."""
         return TESTS
+
+    def get_tests_for_version(self, version_id: str):
+        """Get tests for a specific version using version-specific template if assigned.
+
+        Args:
+            version_id: The client version string (e.g., 'secondblob.bin.2004-01-15')
+
+        Returns:
+            List of tests in (test_key, test_name, description) format, or None if offline/error
+        """
+        if not self.panel or not self.panel.is_configured or self.offline_mode:
+            return None
+
+        try:
+            result = self.panel.get_tests(enabled_only=True, client_version=version_id)
+            if result and result.success and result.tests:
+                tests = []
+                for test in result.tests:
+                    tests.append((
+                        test.test_key,
+                        test.name,
+                        test.description or ''
+                    ))
+                if result.template:
+                    print(f"Using template '{result.template.get('name', 'Unknown')}' for version {version_id} ({len(tests)} tests)")
+                return tests
+            return None
+        except Exception as e:
+            print(f"Error getting tests for version {version_id}: {e}")
+            return None
 
     def _load_versions_from_api(self):
         """Load client versions from the API and update the global API_VERSIONS list.

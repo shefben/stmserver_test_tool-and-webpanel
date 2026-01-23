@@ -137,6 +137,7 @@ class TestsResult:
     tests: List[TestType] = field(default_factory=list)
     grouped: Dict[str, List[TestType]] = field(default_factory=dict)
     error: Optional[str] = None
+    template: Optional[Dict[str, any]] = None  # Template info if version-specific template was applied
 
 
 @dataclass
@@ -605,12 +606,13 @@ class TestPanelClient:
             logger.error(f"Error fetching retest queue: {e}")
             return []
 
-    def get_tests(self, enabled_only: bool = True) -> TestsResult:
+    def get_tests(self, enabled_only: bool = True, client_version: Optional[str] = None) -> TestsResult:
         """
         Get test types and categories from the API.
 
         Args:
             enabled_only: If True, only return enabled tests
+            client_version: Optional client version string to get version-specific template tests
 
         Returns:
             TestsResult with tests grouped by category
@@ -618,6 +620,8 @@ class TestPanelClient:
         params = {}
         if not enabled_only:
             params['all'] = '1'
+        if client_version:
+            params['client_version'] = client_version
 
         try:
             response = self._make_request('GET', '/api/tests.php', params=params)
@@ -637,7 +641,8 @@ class TestPanelClient:
                         success=True,
                         categories=categories,
                         tests=tests,
-                        grouped=grouped
+                        grouped=grouped,
+                        template=data.get('template')  # Include template info if present
                     )
 
             logger.warning(f"Failed to get tests: HTTP {response.status_code}")

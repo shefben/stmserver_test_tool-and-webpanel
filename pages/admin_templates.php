@@ -32,6 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $description = trim($_POST['description'] ?? '');
         $testKeys = $_POST['test_keys'] ?? [];
         $isDefault = isset($_POST['is_default']) && $_POST['is_default'] === '1';
+        $versionIds = $_POST['version_ids'] ?? [];
 
         if (!$name) {
             setFlash('error', 'Template name is required.');
@@ -40,6 +41,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $id = $db->createTestTemplate($name, $description, $testKeys, $user['id'], $isDefault);
             if ($id) {
+                // Set version assignments
+                $db->setTemplateVersions($id, array_map('intval', $versionIds));
                 setFlash('success', "Template '$name' created successfully.");
                 header('Location: ?page=admin_templates');
                 exit;
@@ -53,6 +56,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $description = trim($_POST['description'] ?? '');
         $testKeys = $_POST['test_keys'] ?? [];
         $isDefault = isset($_POST['is_default']) && $_POST['is_default'] === '1';
+        $versionIds = $_POST['version_ids'] ?? [];
 
         $template = $db->getTestTemplate($id);
         if (!$template) {
@@ -63,6 +67,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             setFlash('error', 'Please select at least one test.');
         } else {
             if ($db->updateTestTemplate($id, $name, $description, $testKeys, $isDefault)) {
+                // Update version assignments
+                $db->setTemplateVersions($id, array_map('intval', $versionIds));
                 setFlash('success', "Template '$name' updated successfully.");
                 header('Location: ?page=admin_templates');
                 exit;
@@ -89,15 +95,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Get all templates
-$templates = $db->getTestTemplates();
+// Get all templates with version assignments
+$templates = $db->getTestTemplatesWithVersions();
 $categories = getTestCategories();
 $allTestKeys = getSortedTestKeys();
+$clientVersions = $db->getClientVersions(true); // Get enabled versions only
 
 // Editing a template?
 $editTemplate = null;
+$editTemplateVersionIds = [];
 if ($action === 'edit' && $templateId) {
     $editTemplate = $db->getTestTemplate($templateId);
+    if ($editTemplate) {
+        $editTemplateVersionIds = $db->getTemplateVersionIds($templateId);
+    }
 }
 ?>
 
@@ -136,6 +147,24 @@ if ($action === 'edit' && $templateId) {
                         <?= ($editTemplate['is_default'] ?? false) ? 'checked' : '' ?>>
                     Set as default template
                 </label>
+            </div>
+
+            <div class="form-group">
+                <label for="version_ids">Assign to Client Versions</label>
+                <p class="form-help">When this template is assigned to specific versions, it will override the default template for those versions when the test client loads tests.</p>
+                <select id="version_ids" name="version_ids[]" multiple class="multi-select" size="6">
+                    <?php foreach ($clientVersions as $version): ?>
+                        <?php
+                        $selected = in_array($version['id'], $editTemplateVersionIds) ? 'selected' : '';
+                        $displayName = $version['display_name'] ?: $version['version_id'];
+                        if ($version['steam_date']) {
+                            $displayName .= ' (' . $version['steam_date'] . ')';
+                        }
+                        ?>
+                        <option value="<?= $version['id'] ?>" <?= $selected ?>><?= e($displayName) ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <p class="form-hint">Hold Ctrl/Cmd to select multiple versions. Leave empty to use this template globally when set as default.</p>
             </div>
 
             <div class="form-group">
@@ -195,13 +224,14 @@ if ($action === 'edit' && $templateId) {
                         <th>Name</th>
                         <th>Description</th>
                         <th>Tests</th>
+                        <th>Versions</th>
                         <th>Created By</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if (empty($templates)): ?>
-                        <tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No templates found.</td></tr>
+                        <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No templates found.</td></tr>
                     <?php else: ?>
                         <?php foreach ($templates as $template): ?>
                             <tr>
@@ -219,6 +249,16 @@ if ($action === 'edit' && $templateId) {
                                 </td>
                                 <td>
                                     <span class="test-count-badge"><?= count($template['test_keys']) ?> tests</span>
+                                </td>
+                                <td>
+                                    <?php
+                                    $versionCount = count($template['assigned_versions'] ?? []);
+                                    if ($versionCount > 0):
+                                    ?>
+                                        <span class="version-count-badge"><?= $versionCount ?> version<?= $versionCount > 1 ? 's' : '' ?></span>
+                                    <?php else: ?>
+                                        <span class="version-count-badge version-all">All (default)</span>
+                                    <?php endif; ?>
                                 </td>
                                 <td><?= e($template['creator_name'] ?? 'System') ?></td>
                                 <td>
@@ -351,6 +391,53 @@ if ($action === 'edit' && $templateId) {
 .badge-secondary {
     background: var(--bg-accent);
     color: var(--text-muted);
+}
+
+.multi-select {
+    width: 100%;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    padding: 8px;
+}
+
+.multi-select option {
+    padding: 6px 8px;
+    border-radius: 4px;
+    margin: 2px 0;
+}
+
+.multi-select option:checked {
+    background: var(--primary) linear-gradient(0deg, var(--primary) 0%, var(--primary) 100%);
+    color: #000;
+}
+
+.form-help {
+    color: var(--text-muted);
+    font-size: 13px;
+    margin-bottom: 10px;
+}
+
+.form-hint {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-top: 6px;
+}
+
+.version-count-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    background: var(--bg-accent);
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: bold;
+    color: var(--secondary);
+}
+
+.version-count-badge.version-all {
+    color: var(--text-muted);
+    font-weight: normal;
 }
 </style>
 

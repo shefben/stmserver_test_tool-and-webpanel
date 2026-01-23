@@ -2115,6 +2115,147 @@ class Database {
     }
 
     // =====================
+    // TEMPLATE-VERSION ASSIGNMENTS
+    // =====================
+
+    /**
+     * Ensure test_template_versions junction table exists
+     */
+    public function ensureTemplateVersionsTable() {
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS test_template_versions (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    template_id INT NOT NULL,
+                    client_version_id INT NOT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY unique_template_version (template_id, client_version_id),
+                    INDEX idx_template_id (template_id),
+                    INDEX idx_client_version_id (client_version_id)
+                ) ENGINE=InnoDB
+            ");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Get client version IDs assigned to a template
+     */
+    public function getTemplateVersionIds($templateId) {
+        $this->ensureTemplateVersionsTable();
+        $stmt = $this->pdo->prepare("
+            SELECT client_version_id FROM test_template_versions WHERE template_id = ?
+        ");
+        $stmt->execute([$templateId]);
+        return array_column($stmt->fetchAll(), 'client_version_id');
+    }
+
+    /**
+     * Get client versions assigned to a template (full objects)
+     */
+    public function getTemplateVersions($templateId) {
+        $this->ensureTemplateVersionsTable();
+        $this->ensureClientVersionsTable();
+        $stmt = $this->pdo->prepare("
+            SELECT cv.*
+            FROM client_versions cv
+            INNER JOIN test_template_versions ttv ON cv.id = ttv.client_version_id
+            WHERE ttv.template_id = ?
+            ORDER BY cv.sort_order ASC, cv.steam_date DESC
+        ");
+        $stmt->execute([$templateId]);
+        $versions = $stmt->fetchAll();
+
+        foreach ($versions as &$version) {
+            $version['packages'] = json_decode($version['packages'], true) ?? [];
+            $version['skip_tests'] = json_decode($version['skip_tests'], true) ?? [];
+        }
+
+        return $versions;
+    }
+
+    /**
+     * Set client versions for a template (replaces existing assignments)
+     */
+    public function setTemplateVersions($templateId, $versionIds) {
+        $this->ensureTemplateVersionsTable();
+
+        // Delete existing assignments
+        $stmt = $this->pdo->prepare("DELETE FROM test_template_versions WHERE template_id = ?");
+        $stmt->execute([$templateId]);
+
+        // Insert new assignments
+        if (!empty($versionIds)) {
+            $stmt = $this->pdo->prepare("
+                INSERT INTO test_template_versions (template_id, client_version_id)
+                VALUES (?, ?)
+            ");
+            foreach ($versionIds as $versionId) {
+                $stmt->execute([$templateId, $versionId]);
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Get template for a specific client version
+     * Returns version-specific template if assigned, otherwise returns default template
+     */
+    public function getTemplateForVersion($clientVersionId) {
+        $this->ensureTemplateVersionsTable();
+
+        // First check for a version-specific template
+        $stmt = $this->pdo->prepare("
+            SELECT t.*, u.username as creator_name
+            FROM test_templates t
+            INNER JOIN test_template_versions ttv ON t.id = ttv.template_id
+            LEFT JOIN users u ON t.created_by = u.id
+            WHERE ttv.client_version_id = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$clientVersionId]);
+        $template = $stmt->fetch();
+
+        // If no version-specific template, get the default
+        if (!$template) {
+            $template = $this->getDefaultTemplate();
+        }
+
+        if ($template) {
+            $template['test_keys'] = json_decode($template['test_keys'], true) ?? [];
+        }
+
+        return $template ?: null;
+    }
+
+    /**
+     * Get template for a client version by version_id string
+     */
+    public function getTemplateForVersionString($versionId) {
+        $version = $this->getClientVersionByVersionId($versionId);
+        if (!$version) {
+            return $this->getDefaultTemplate();
+        }
+        return $this->getTemplateForVersion($version['id']);
+    }
+
+    /**
+     * Get all templates with their version assignments
+     */
+    public function getTestTemplatesWithVersions() {
+        $templates = $this->getTestTemplates();
+
+        foreach ($templates as &$template) {
+            $template['assigned_versions'] = $this->getTemplateVersionIds($template['id']);
+        }
+
+        return $templates;
+    }
+
+    // =====================
     // REPORT TAGS
     // =====================
 

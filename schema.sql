@@ -289,6 +289,20 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     FOREIGN KEY (used_by) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
+-- Test template to client version assignments (many-to-many)
+-- When a template is assigned to specific versions, it overrides the default template for those versions
+CREATE TABLE IF NOT EXISTS test_template_versions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    template_id INT NOT NULL,
+    client_version_id INT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_template_version (template_id, client_version_id),
+    INDEX idx_template_id (template_id),
+    INDEX idx_client_version_id (client_version_id),
+    FOREIGN KEY (template_id) REFERENCES test_templates(id) ON DELETE CASCADE,
+    FOREIGN KEY (client_version_id) REFERENCES client_versions(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- Insert default report tags
 INSERT INTO report_tags (name, color, description) VALUES
     ('verified', '#27ae60', 'Report has been verified by admin'),

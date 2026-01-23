@@ -552,12 +552,13 @@ class PanelIntegration(QObject):
             logger.error(f"Error getting retests for version: {e}")
             return []
 
-    def get_tests(self, enabled_only: bool = True):
+    def get_tests(self, enabled_only: bool = True, client_version: str = None):
         """
         Get test types and categories from the API.
 
         Args:
             enabled_only: If True, only return enabled tests
+            client_version: Optional client version string to get version-specific template tests
 
         Returns:
             TestsResult object with tests grouped by category, or None if not configured
@@ -571,7 +572,7 @@ class PanelIntegration(QObject):
             return None
 
         try:
-            return self._client.get_tests(enabled_only)
+            return self._client.get_tests(enabled_only, client_version)
         except Exception as e:
             logger.error(f"Error getting tests from API: {e}")
             return None
