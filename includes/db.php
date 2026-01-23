@@ -2745,16 +2745,34 @@ class Database {
     public function createInviteCode($createdBy, $expiryDays = 3) {
         $this->ensureInviteCodesTable();
 
-        $code = $this->generateInviteCode();
         $expiresAt = date('Y-m-d H:i:s', strtotime("+{$expiryDays} days"));
 
-        $stmt = $this->pdo->prepare("
-            INSERT INTO invite_codes (code, created_by, expires_at, created_at)
-            VALUES (?, ?, ?, NOW())
-        ");
+        // Retry up to 3 times in case of extremely unlikely code collision
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            $code = $this->generateInviteCode();
 
-        if ($stmt->execute([$code, $createdBy, $expiresAt])) {
-            return $this->getInviteCode($code);
+            try {
+                $stmt = $this->pdo->prepare("
+                    INSERT INTO invite_codes (code, created_by, expires_at, created_at)
+                    VALUES (?, ?, ?, NOW())
+                ");
+
+                if ($stmt->execute([$code, $createdBy, $expiresAt])) {
+                    // Use lastInsertId for reliable retrieval of the just-inserted row
+                    $insertedId = $this->pdo->lastInsertId();
+                    if ($insertedId) {
+                        return $this->getInviteCodeById((int)$insertedId);
+                    }
+                    // Fallback to code lookup if lastInsertId fails
+                    return $this->getInviteCode($code);
+                }
+            } catch (PDOException $e) {
+                // Duplicate key error (code 23000) - regenerate and retry
+                if ($e->getCode() == 23000) {
+                    continue;
+                }
+                throw $e;
+            }
         }
 
         return false;
@@ -2902,13 +2920,7 @@ class Database {
      * @return array ['success' => bool, 'error' => string|null, 'user' => array|null]
      */
     public function useInviteCode($code, $username, $password) {
-        // Validate the code first
-        $validation = $this->validateInviteCode($code);
-        if (!$validation['valid']) {
-            return ['success' => false, 'error' => $validation['error'], 'user' => null];
-        }
-
-        // Check if username is valid
+        // Check if username is valid (do this before transaction to fail fast)
         if (strlen($username) < 3) {
             return ['success' => false, 'error' => 'Username must be at least 3 characters', 'user' => null];
         }
@@ -2927,10 +2939,36 @@ class Database {
             return ['success' => false, 'error' => 'Password must be at least 6 characters', 'user' => null];
         }
 
-        // Start transaction
+        // Start transaction for atomic invite code claim + user creation
         $this->pdo->beginTransaction();
 
         try {
+            // Lock and validate the invite code within the transaction
+            // This prevents race conditions where multiple users try to use the same code
+            $stmt = $this->pdo->prepare("
+                SELECT id, code, used_by, expires_at
+                FROM invite_codes
+                WHERE code = ?
+                FOR UPDATE
+            ");
+            $stmt->execute([$code]);
+            $invite = $stmt->fetch();
+
+            if (!$invite) {
+                $this->pdo->rollBack();
+                return ['success' => false, 'error' => 'Invalid invite code', 'user' => null];
+            }
+
+            if ($invite['used_by'] !== null) {
+                $this->pdo->rollBack();
+                return ['success' => false, 'error' => 'This invite code has already been used', 'user' => null];
+            }
+
+            if (strtotime($invite['expires_at']) < time()) {
+                $this->pdo->rollBack();
+                return ['success' => false, 'error' => 'This invite code has expired', 'user' => null];
+            }
+
             // Create the user
             $user = $this->createUser($username, $password, 'user');
             if (!$user) {
@@ -2938,13 +2976,19 @@ class Database {
                 return ['success' => false, 'error' => 'Failed to create user', 'user' => null];
             }
 
-            // Mark invite code as used
+            // Mark invite code as used - use ID for precise targeting
             $stmt = $this->pdo->prepare("
                 UPDATE invite_codes
                 SET used_by = ?, used_at = NOW()
-                WHERE code = ?
+                WHERE id = ? AND used_by IS NULL
             ");
-            $stmt->execute([$user['id'], $code]);
+            $stmt->execute([$user['id'], $invite['id']]);
+
+            // Verify exactly one row was updated
+            if ($stmt->rowCount() !== 1) {
+                $this->pdo->rollBack();
+                return ['success' => false, 'error' => 'Failed to claim invite code - it may have been used by another user', 'user' => null];
+            }
 
             $this->pdo->commit();
             return ['success' => true, 'error' => null, 'user' => $user];

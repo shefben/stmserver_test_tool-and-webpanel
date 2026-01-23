@@ -192,7 +192,7 @@ $stats = $db->getInviteCodeStats();
                                 <code class="invite-code" id="code-<?= $invite['id'] ?>"><?= e($invite['code']) ?></code>
                                 <?php if ($isValid): ?>
                                     <button type="button" class="btn btn-sm btn-secondary copy-btn"
-                                            onclick="copyToClipboard('code-<?= $invite['id'] ?>')" title="Copy to clipboard">
+                                            onclick="copyInviteCode('code-<?= $invite['id'] ?>')" title="Copy to clipboard">
                                         Copy
                                     </button>
                                 <?php endif; ?>
@@ -423,11 +423,9 @@ $stats = $db->getInviteCodeStats();
 </style>
 
 <script>
-function copyToClipboard(elementId) {
+function copyInviteCode(elementId) {
     const text = document.getElementById(elementId).textContent;
-    navigator.clipboard.writeText(text).then(() => {
-        alert('Invite code copied to clipboard!');
-    });
+    copyToClipboard(text); // Use app.js copyToClipboard which handles fallbacks
 }
 </script>
 
