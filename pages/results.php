@@ -287,8 +287,12 @@ function buildStatusLink($status, $baseParams) {
                                 </a>
                             </td>
                             <td><?= getStatusBadge($result['status']) ?></td>
-                            <td class="notes-cell" data-full="<?= e($result['notes']) ?>">
-                                <?= e($result['notes'] ?: '-') ?>
+                            <td class="notes-cell rich-notes" data-full="<?= e($result['notes']) ?>">
+                                <?php if ($result['notes']): ?>
+                                    <div class="notes-content"><?= e($result['notes']) ?></div>
+                                <?php else: ?>
+                                    <span class="notes-empty">-</span>
+                                <?php endif; ?>
                             </td>
                             <td>
                                 <a href="?page=results&tester=<?= urlencode($result['tester']) ?>" style="color: var(--text-muted);">
@@ -486,5 +490,29 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 </script>
 <?php endif; ?>
+
+<!-- Rich Notes Initialization -->
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Initialize rich notes rendering for notes cells
+    if (typeof RichNotesRenderer !== 'undefined') {
+        document.querySelectorAll('.notes-cell.rich-notes').forEach(function(cell) {
+            var contentEl = cell.querySelector('.notes-content');
+            if (!contentEl) return;
+
+            var rawContent = cell.getAttribute('data-full') || contentEl.textContent;
+
+            // Check if content has rich formatting
+            if (RichNotesRenderer.hasRichContent(rawContent)) {
+                contentEl.innerHTML = RichNotesRenderer.render(rawContent);
+                cell.classList.add('rich-notes-rendered');
+                cell.classList.add('expanded');
+                cell.style.cursor = 'auto';
+                cell.removeAttribute('title');
+            }
+        });
+    }
+});
+</script>
 
 <?php require_once __DIR__ . '/../includes/footer.php'; ?>

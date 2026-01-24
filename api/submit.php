@@ -70,6 +70,20 @@ $insertedReports = [];
 $failedReports = [];
 
 foreach ($allReports as $parsed) {
+    // Clean notes before computing hash and batch insert
+    $cleanedResults = [];
+    foreach ($parsed['results'] as $testKey => $result) {
+        $cleanedResults[$testKey] = [
+            'status' => $result['status'],
+            'notes' => cleanNotes($result['notes'] ?? '')
+        ];
+    }
+
+    // Compute content hash from cleaned results and attached logs
+    // This must match Python's compute_version_hash() exactly
+    $attachedLogs = $parsed['attached_logs'] ?? [];
+    $contentHash = computeReportContentHash($cleanedResults, $attachedLogs);
+
     $reportId = $db->insertReport(
         $parsed['tester'],
         $parsed['commit_hash'],
@@ -78,26 +92,18 @@ foreach ($allReports as $parsed) {
         $rawBody,
         $parsed['test_duration'] ?? null,
         $parsed['steamui_version'] ?? null,
-        $parsed['steam_pkg_version'] ?? null
+        $parsed['steam_pkg_version'] ?? null,
+        $contentHash
     );
 
     if ($reportId) {
-        // Clean notes before batch insert
-        $cleanedResults = [];
-        foreach ($parsed['results'] as $testKey => $result) {
-            $cleanedResults[$testKey] = [
-                'status' => $result['status'],
-                'notes' => cleanNotes($result['notes'] ?? '')
-            ];
-        }
-
         // Batch insert test results (much faster than one-by-one)
         $insertedCount = $db->insertTestResultsBatch($reportId, $cleanedResults);
 
         // Insert attached log files (if any)
         $logsCount = 0;
-        if (!empty($parsed['attached_logs']) && is_array($parsed['attached_logs'])) {
-            foreach ($parsed['attached_logs'] as $log) {
+        if (!empty($attachedLogs) && is_array($attachedLogs)) {
+            foreach ($attachedLogs as $log) {
                 if (!empty($log['filename']) && !empty($log['data'])) {
                     $logDatetime = $log['datetime'] ?? date('Y-m-d H:i:s');
                     $sizeOriginal = $log['size_original'] ?? 0;
@@ -161,6 +167,7 @@ foreach ($allReports as $parsed) {
             'tests_recorded' => $insertedCount,
             'logs_attached' => $logsCount,
             'regressions_detected' => $regressionsDetected,
+            'content_hash' => $contentHash,
             'view_url' => getBaseUrl() . '/?page=report_detail&id=' . $reportId
         ];
     } else {

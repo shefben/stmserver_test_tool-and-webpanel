@@ -52,14 +52,59 @@ function e($string) {
     return htmlspecialchars($string ?? '', ENT_QUOTES, 'UTF-8');
 }
 
-// Strip HTML tags from notes
+// Clean notes while preserving markdown-style formatting
+// Handles Qt rich text HTML conversion to plain text/markdown
 function cleanNotes($notes) {
-    // Handle Qt rich text HTML
+    if (empty($notes)) return '';
+
+    // Check if this already looks like markdown (not HTML)
+    // If it has code blocks, image syntax, etc., preserve it as-is
+    if (preg_match('/```[\s\S]*```/', $notes) ||
+        preg_match('/!\[[^\]]*\]\([^)]+\)/', $notes) ||
+        preg_match('/\[image:data:image\//', $notes) ||
+        preg_match('/\{\{IMAGE:data:image\//', $notes)) {
+        // Already markdown-formatted, just clean up
+        $text = $notes;
+        // Remove Qt rich text CSS that might leak through
+        $text = str_replace('p, li { white-space: pre-wrap; }', '', $text);
+        return trim($text);
+    }
+
+    // Extract embedded images from Qt HTML before stripping tags
+    // Qt sends images as: <a href="data:image/png;base64,...">image</a>
+    $extractedImages = [];
+
+    // Match anchor tags with data:image hrefs (Qt format)
+    if (preg_match_all('/<a\s+[^>]*href=["\']?(data:image\/[^"\'>\s]+)["\']?[^>]*>/i', $notes, $matches)) {
+        foreach ($matches[1] as $dataUri) {
+            $extractedImages[] = $dataUri;
+        }
+    }
+
+    // Also match img tags with data URIs
+    if (preg_match_all('/<img\s+[^>]*src=["\']?(data:image\/[^"\'>\s]+)["\']?[^>]*>/i', $notes, $matches)) {
+        foreach ($matches[1] as $dataUri) {
+            $extractedImages[] = $dataUri;
+        }
+    }
+
+    // Handle Qt rich text HTML - convert to plain text
     $text = strip_tags($notes);
     $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
     // Remove Qt rich text CSS that leaks through
     $text = str_replace('p, li { white-space: pre-wrap; }', '', $text);
+    // Clean up "image" link text that Qt leaves behind
+    $text = preg_replace('/\bimage\b\s*/i', '', $text);
     $text = trim($text);
+
+    // Append extracted images in a format the renderer understands
+    if (!empty($extractedImages)) {
+        foreach ($extractedImages as $dataUri) {
+            $text .= "\n\n{{IMAGE:" . $dataUri . "}}";
+        }
+        $text = trim($text);
+    }
+
     return $text;
 }
 
@@ -295,6 +340,63 @@ function buildUrl($page, $params = []) {
         $url .= "&{$key}=" . urlencode($value);
     }
     return $url;
+}
+
+/**
+ * Recursively sort array keys for consistent JSON output
+ * This matches Python's json.dumps(sort_keys=True) behavior
+ */
+function sortKeysRecursive($data) {
+    if (!is_array($data)) {
+        return $data;
+    }
+
+    // Check if this is an associative array (dict) or sequential array (list)
+    $isAssoc = array_keys($data) !== range(0, count($data) - 1);
+
+    if ($isAssoc) {
+        // Sort associative arrays by key
+        ksort($data, SORT_STRING);
+    }
+
+    // Recursively sort child arrays
+    foreach ($data as $key => $value) {
+        $data[$key] = sortKeysRecursive($value);
+    }
+
+    return $data;
+}
+
+/**
+ * Compute a content hash for report data.
+ * This MUST match Python's compute_version_hash() function exactly.
+ *
+ * Python implementation:
+ *   data_to_hash = {'results': results_data, 'logs': attached_logs or []}
+ *   json_str = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=True)
+ *   return hashlib.sha256(json_str.encode('utf-8')).hexdigest()
+ *
+ * @param array $resultsData The test results data (keyed by test key)
+ * @param array $attachedLogs Optional array of attached log entries
+ * @return string SHA256 hash hex string
+ */
+function computeReportContentHash(array $resultsData, array $attachedLogs = []): string {
+    // Create the same structure as Python
+    $dataToHash = [
+        'logs' => $attachedLogs,
+        'results' => $resultsData
+    ];
+
+    // Sort keys recursively to match Python's sort_keys=True
+    $dataToHash = sortKeysRecursive($dataToHash);
+
+    // Encode to JSON with settings to match Python's ensure_ascii=True
+    // JSON_UNESCAPED_SLASHES matches Python default, but we need ASCII escaping
+    // PHP's default json_encode already escapes non-ASCII to \uXXXX format
+    $jsonStr = json_encode($dataToHash, JSON_UNESCAPED_SLASHES);
+
+    // Compute SHA256 hash
+    return hash('sha256', $jsonStr);
 }
 
 // Pagination helper

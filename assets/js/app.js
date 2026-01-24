@@ -170,16 +170,19 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // Expandable notes
+    // Expandable notes - show in rich modal instead of alert
     const noteCells = document.querySelectorAll('.notes-cell');
     noteCells.forEach(cell => {
-        if (cell.scrollWidth > cell.clientWidth) {
+        if (cell.scrollWidth > cell.clientWidth || cell.getAttribute('data-full')) {
             cell.style.cursor = 'pointer';
-            cell.title = 'Click to expand';
-            cell.addEventListener('click', function() {
+            cell.title = 'Click to view full notes';
+            cell.addEventListener('click', function(e) {
+                // Don't trigger if clicking a link inside the cell
+                if (e.target.tagName === 'A' || e.target.tagName === 'IMG') return;
+
                 const fullNotes = this.getAttribute('data-full');
                 if (fullNotes) {
-                    alert(fullNotes);
+                    RichNotesRenderer.openNotesModal(fullNotes);
                 }
             });
         }
@@ -698,4 +701,314 @@ class SortableTable {
 document.addEventListener('DOMContentLoaded', function() {
     const sortableTables = document.querySelectorAll('table.sortable');
     sortableTables.forEach(table => new SortableTable(table));
+});
+
+/**
+ * Rich Notes Renderer
+ * Parses and renders notes containing:
+ * - Code blocks (```language\n...\n```)
+ * - Inline code (`code`)
+ * - Images (markdown ![alt](url) or data: URIs)
+ * - URLs (auto-linked)
+ * - Line breaks
+ */
+const RichNotesRenderer = {
+    /**
+     * Render rich notes content
+     * @param {string} content - Raw notes content
+     * @returns {string} - HTML string
+     */
+    render: function(content) {
+        if (!content || content === '-') return content;
+
+        // Escape HTML first to prevent XSS
+        let html = this.escapeHtml(content);
+
+        // Process code blocks first (```language\n...\n```)
+        html = this.renderCodeBlocks(html);
+
+        // Process inline code (`code`)
+        html = this.renderInlineCode(html);
+
+        // Process images (markdown style and data URIs)
+        html = this.renderImages(html);
+
+        // Auto-link URLs (but not inside code blocks or images)
+        html = this.renderLinks(html);
+
+        // Convert newlines to <br> (but not inside <pre> blocks)
+        html = this.renderLineBreaks(html);
+
+        return html;
+    },
+
+    /**
+     * Escape HTML entities
+     */
+    escapeHtml: function(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    },
+
+    /**
+     * Render fenced code blocks
+     * Supports: ```language\ncode\n``` or just ```\ncode\n```
+     */
+    renderCodeBlocks: function(html) {
+        // Match ```language\ncode\n``` pattern
+        const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+
+        return html.replace(codeBlockRegex, function(match, lang, code) {
+            const langClass = lang ? ' data-language="' + lang + '"' : '';
+            const langLabel = lang ? '<span class="code-lang">' + lang + '</span>' : '';
+            // Trim trailing newline from code
+            code = code.replace(/\n$/, '');
+            return '<div class="code-block-wrapper">' + langLabel +
+                   '<pre class="code-block"' + langClass + '><code>' + code + '</code></pre>' +
+                   '<button type="button" class="code-copy-btn" onclick="RichNotesRenderer.copyCode(this)" title="Copy code">📋</button></div>';
+        });
+    },
+
+    /**
+     * Render inline code
+     * Supports: `code`
+     */
+    renderInlineCode: function(html) {
+        // Match `code` pattern, but not inside code blocks
+        return html.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>');
+    },
+
+    /**
+     * Render images
+     * Supports:
+     * - Markdown: ![alt](url)
+     * - Data URI: [image:data:image/png;base64,...]
+     * - Plain data URI: data:image/...
+     */
+    renderImages: function(html) {
+        // Markdown image syntax: ![alt](url)
+        html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, function(match, alt, url) {
+            return '<div class="note-image-wrapper"><img src="' + url + '" alt="' + alt + '" class="note-image" onclick="RichNotesRenderer.openImageModal(this)" /></div>';
+        });
+
+        // Data URI pattern: [image:data:image/...]
+        html = html.replace(/\[image:(data:image\/[^\]]+)\]/g, function(match, dataUri) {
+            return '<div class="note-image-wrapper"><img src="' + dataUri + '" alt="Embedded image" class="note-image" onclick="RichNotesRenderer.openImageModal(this)" /></div>';
+        });
+
+        // Plain base64 image block marker: {{IMAGE:data:image/...}}
+        html = html.replace(/\{\{IMAGE:(data:image\/[^}]+)\}\}/g, function(match, dataUri) {
+            return '<div class="note-image-wrapper"><img src="' + dataUri + '" alt="Embedded image" class="note-image" onclick="RichNotesRenderer.openImageModal(this)" /></div>';
+        });
+
+        return html;
+    },
+
+    /**
+     * Auto-link URLs
+     */
+    renderLinks: function(html) {
+        // Match URLs not already in HTML tags or code blocks
+        // Simple URL pattern
+        const urlRegex = /(?<!["'=])(https?:\/\/[^\s<>\[\]]+)/g;
+
+        return html.replace(urlRegex, '<a href="$1" target="_blank" rel="noopener noreferrer" class="note-link">$1</a>');
+    },
+
+    /**
+     * Convert newlines to <br> except inside pre blocks
+     */
+    renderLineBreaks: function(html) {
+        // Split by pre blocks, process non-pre parts, rejoin
+        const parts = html.split(/(<pre[\s\S]*?<\/pre>)/g);
+
+        return parts.map(function(part) {
+            if (part.startsWith('<pre')) {
+                return part;
+            }
+            return part.replace(/\n/g, '<br>');
+        }).join('');
+    },
+
+    /**
+     * Copy code to clipboard
+     */
+    copyCode: function(btn) {
+        const wrapper = btn.closest('.code-block-wrapper');
+        const code = wrapper.querySelector('code').textContent;
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(code).then(function() {
+                btn.textContent = '✓';
+                btn.classList.add('copied');
+                setTimeout(function() {
+                    btn.textContent = '📋';
+                    btn.classList.remove('copied');
+                }, 2000);
+            });
+        } else {
+            // Fallback
+            const textarea = document.createElement('textarea');
+            textarea.value = code;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                document.execCommand('copy');
+                btn.textContent = '✓';
+                btn.classList.add('copied');
+                setTimeout(function() {
+                    btn.textContent = '📋';
+                    btn.classList.remove('copied');
+                }, 2000);
+            } catch (err) {
+                console.error('Failed to copy code');
+            }
+            document.body.removeChild(textarea);
+        }
+    },
+
+    /**
+     * Open image in modal for full view
+     */
+    openImageModal: function(img) {
+        // Create modal overlay
+        const existingModal = document.getElementById('note-image-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'note-image-modal';
+        modal.className = 'note-image-modal';
+        modal.innerHTML =
+            '<div class="note-image-modal-content">' +
+                '<button type="button" class="note-image-modal-close" onclick="this.closest(\'.note-image-modal\').remove()">&times;</button>' +
+                '<img src="' + img.src + '" alt="' + (img.alt || 'Image') + '" />' +
+            '</div>';
+
+        modal.addEventListener('click', function(e) {
+            if (e.target === modal) {
+                modal.remove();
+            }
+        });
+
+        document.body.appendChild(modal);
+
+        // Close on Escape
+        const closeOnEscape = function(e) {
+            if (e.key === 'Escape') {
+                modal.remove();
+                document.removeEventListener('keydown', closeOnEscape);
+            }
+        };
+        document.addEventListener('keydown', closeOnEscape);
+    },
+
+    /**
+     * Open notes content in a modal with rich rendering
+     * Replaces the basic alert() for viewing full notes
+     */
+    openNotesModal: function(content) {
+        // Remove any existing notes modal
+        const existingModal = document.getElementById('notes-view-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        // Create modal overlay
+        const modal = document.createElement('div');
+        modal.id = 'notes-view-modal';
+        modal.className = 'notes-view-modal';
+
+        // Render the content with RichNotesRenderer
+        const renderedContent = this.render(content);
+
+        modal.innerHTML =
+            '<div class="notes-view-modal-content">' +
+                '<div class="notes-view-modal-header">' +
+                    '<h3>Notes</h3>' +
+                    '<button type="button" class="notes-view-modal-close" onclick="this.closest(\'.notes-view-modal\').remove()" title="Close">&times;</button>' +
+                '</div>' +
+                '<div class="notes-view-modal-body rich-notes-rendered">' +
+                    renderedContent +
+                '</div>' +
+            '</div>';
+
+        // Close on backdrop click
+        modal.addEventListener('click', function(e) {
+            if (e.target === modal) {
+                modal.remove();
+            }
+        });
+
+        document.body.appendChild(modal);
+
+        // Close on Escape
+        const closeOnEscape = function(e) {
+            if (e.key === 'Escape') {
+                modal.remove();
+                document.removeEventListener('keydown', closeOnEscape);
+            }
+        };
+        document.addEventListener('keydown', closeOnEscape);
+    },
+
+    /**
+     * Initialize rich notes rendering on page
+     * Call this after DOM is ready
+     */
+    init: function(selector) {
+        selector = selector || '.notes-cell, .rich-notes';
+        const elements = document.querySelectorAll(selector);
+
+        elements.forEach(function(el) {
+            // Skip if already rendered
+            if (el.classList.contains('rich-notes-rendered')) return;
+
+            // Get the raw content
+            const rawContent = el.getAttribute('data-full') || el.textContent;
+
+            // Only render if content has rich formatting markers
+            if (RichNotesRenderer.hasRichContent(rawContent)) {
+                el.innerHTML = RichNotesRenderer.render(rawContent);
+                el.classList.add('rich-notes-rendered');
+            }
+        });
+    },
+
+    /**
+     * Check if content has rich formatting
+     */
+    hasRichContent: function(content) {
+        if (!content) return false;
+
+        // Check for code blocks
+        if (/```[\s\S]*```/.test(content)) return true;
+
+        // Check for inline code
+        if (/`[^`]+`/.test(content)) return true;
+
+        // Check for markdown images
+        if (/!\[[^\]]*\]\([^)]+\)/.test(content)) return true;
+
+        // Check for embedded image markers
+        if (/\[image:data:image\//.test(content)) return true;
+        if (/\{\{IMAGE:data:image\//.test(content)) return true;
+
+        // Check for URLs
+        if (/https?:\/\/[^\s]+/.test(content)) return true;
+
+        return false;
+    }
+};
+
+// Auto-initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    // Delay slightly to ensure all elements are ready
+    setTimeout(function() {
+        RichNotesRenderer.init();
+    }, 100);
 });

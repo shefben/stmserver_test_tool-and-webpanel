@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS reports (
     steam_pkg_version VARCHAR(100) DEFAULT NULL COMMENT 'Steam package version',
     submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     raw_json LONGTEXT,
+    content_hash VARCHAR(64) DEFAULT NULL COMMENT 'SHA256 hash of report content for deduplication',
     test_duration INT DEFAULT NULL COMMENT 'Test duration in seconds',
     revision_count INT NOT NULL DEFAULT 0,
     restored_from INT DEFAULT NULL,
@@ -42,7 +43,8 @@ CREATE TABLE IF NOT EXISTS reports (
     INDEX idx_tester_version_type (tester, client_version, test_type),
     INDEX idx_steamui_version (steamui_version),
     INDEX idx_steam_pkg_version (steam_pkg_version),
-    INDEX idx_last_modified (last_modified)
+    INDEX idx_last_modified (last_modified),
+    INDEX idx_content_hash (content_hash)
 ) ENGINE=InnoDB;
 
 -- Migration: Add test_duration column if not exists (for existing installations)
@@ -53,6 +55,10 @@ CREATE TABLE IF NOT EXISTS reports (
 -- ALTER TABLE reports ADD COLUMN IF NOT EXISTS steam_pkg_version VARCHAR(100) DEFAULT NULL COMMENT 'Steam package version' AFTER steamui_version;
 -- ALTER TABLE reports ADD INDEX idx_steamui_version (steamui_version);
 -- ALTER TABLE reports ADD INDEX idx_steam_pkg_version (steam_pkg_version);
+
+-- Migration: Add content_hash column for deduplication (for existing installations)
+-- ALTER TABLE reports ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64) DEFAULT NULL COMMENT 'SHA256 hash of report content for deduplication' AFTER raw_json;
+-- ALTER TABLE reports ADD INDEX idx_content_hash (content_hash);
 
 -- Test results table
 CREATE TABLE IF NOT EXISTS test_results (

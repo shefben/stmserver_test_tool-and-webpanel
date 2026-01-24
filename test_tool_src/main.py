@@ -156,30 +156,34 @@ class ImageTextEdit(QTextEdit):
         if source.hasImage():
             image = source.imageData()
             try:
-                # full image bytes
+                # full image bytes - only store the full image
                 ba_full = QtCore.QByteArray()
                 buf_full = QtCore.QBuffer(ba_full)
                 buf_full.open(QtCore.QIODevice.WriteOnly)
                 image.save(buf_full, 'PNG')
                 b64_full = ba_full.toBase64().data().decode('ascii')
 
-                # create thumbnail (previously max width 250). Reduce thumbnail size by 75% => 25% of original max
-                base_max_w = 250
-                scale_factor = 0.50
-                max_w = int(base_max_w * scale_factor)
-                if image.width() > max_w:
-                    thumb = image.scaledToWidth(max_w, QtCore.Qt.SmoothTransformation)
-                else:
-                    thumb = image
-                ba_thumb = QtCore.QByteArray()
-                buf_thumb = QtCore.QBuffer(ba_thumb)
-                buf_thumb.open(QtCore.QIODevice.WriteOnly)
-                thumb.save(buf_thumb, 'PNG')
-                b64_thumb = ba_thumb.toBase64().data().decode('ascii')
+                # calculate thumbnail display dimensions (maintaining aspect ratio)
+                # Qt's QTextEdit doesn't support CSS max-width, so we use explicit width/height
+                thumb_max_w = 125
+                thumb_max_h = 100
+                orig_w = image.width()
+                orig_h = image.height()
 
-                # insert clickable thumbnail which links to the full embedded image
-                # inline style uses the reduced thumbnail dimensions for display
-                img_html = f'<a href="data:image/png;base64,{b64_full}"><img src="data:image/png;base64,{b64_thumb}" style="max-width:{max_w}px;max-height:{int(200*scale_factor)}px;" /></a>'
+                # scale to fit within thumbnail bounds while maintaining aspect ratio
+                if orig_w > 0 and orig_h > 0:
+                    scale_w = thumb_max_w / orig_w
+                    scale_h = thumb_max_h / orig_h
+                    scale = min(scale_w, scale_h, 1.0)  # don't upscale small images
+                    display_w = int(orig_w * scale)
+                    display_h = int(orig_h * scale)
+                else:
+                    display_w = thumb_max_w
+                    display_h = thumb_max_h
+
+                # insert clickable image - uses full image with explicit dimensions for thumbnail display
+                # clicking opens the full-size image via the anchor href
+                img_html = f'<a href="data:image/png;base64,{b64_full}"><img src="data:image/png;base64,{b64_full}" width="{display_w}" height="{display_h}" title="Click to view full size" /></a>'
                 # add a small spacer after image
                 img_html += '<br/>'
                 self.textCursor().insertHtml(img_html)
@@ -351,9 +355,147 @@ TESTS = list(FALLBACK_TESTS)
 STATUS_OPTIONS = ["", "Working", "Semi-working", "Not working", "N/A"]
 
 
+def convert_old_thumbnail_format(html: str) -> str:
+    """
+    Convert old thumbnail format to new format in HTML notes.
+
+    Old format stored separate thumbnail and full images:
+        <a href="data:image/png;base64,{FULL}"><img src="data:image/png;base64,{THUMB}" style="..."/></a>
+
+    New format uses single full image with width/height for display:
+        <a href="data:image/png;base64,{FULL}"><img src="data:image/png;base64,{FULL}" width="125" height="100" .../></a>
+
+    Args:
+        html: HTML string possibly containing old thumbnail format
+
+    Returns:
+        HTML with old thumbnails converted to new format
+    """
+    if not html:
+        return html
+
+    # Pattern to match anchor with data:image href containing img with different data:image src
+    # Captures: full href, the img tag, and the thumbnail src
+    pattern = re.compile(
+        r'<a\s+[^>]*href=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>'  # anchor with data:image href
+        r'\s*<img\s+([^>]*?)src=["\']?(data:image/[^"\'>\s]+)["\']?([^>]*)/?>'  # img with src
+        r'\s*</a>',
+        re.IGNORECASE | re.DOTALL
+    )
+
+    def replace_thumbnail(match):
+        full_image = match.group(1)  # href (full image)
+        img_attrs_before = match.group(2)  # attributes before src
+        thumb_image = match.group(3)  # src (thumbnail)
+        img_attrs_after = match.group(4)  # attributes after src
+
+        # If href and src are the same, already in new format
+        if full_image == thumb_image:
+            return match.group(0)
+
+        # Check if this looks like old format (different images)
+        # Build new img tag using full image with thumbnail display size
+        # Remove old style/width/height attributes and add new ones
+        attrs = img_attrs_before + img_attrs_after
+        # Remove old style attribute
+        attrs = re.sub(r'\s*style=["\'][^"\']*["\']', '', attrs, flags=re.IGNORECASE)
+        # Remove old width/height attributes
+        attrs = re.sub(r'\s*width=["\']?\d+["\']?', '', attrs, flags=re.IGNORECASE)
+        attrs = re.sub(r'\s*height=["\']?\d+["\']?', '', attrs, flags=re.IGNORECASE)
+        attrs = attrs.strip()
+
+        # Build new img tag with full image and thumbnail dimensions
+        new_img = f'<img src="{full_image}" width="125" height="100" title="Click to view full size"'
+        if attrs:
+            new_img += f' {attrs}'
+        new_img += ' />'
+
+        return f'<a href="{full_image}">{new_img}</a>'
+
+    return pattern.sub(replace_thumbnail, html)
+
+
+def clean_notes(notes: str) -> str:
+    """
+    Clean notes text to match PHP's cleanNotes() function.
+
+    This converts Qt rich text HTML to plain text/markdown format,
+    extracting embedded images and reformatting them.
+
+    The output MUST match PHP's cleanNotes() exactly for hash comparison.
+
+    Args:
+        notes: Raw notes string, possibly containing Qt HTML
+
+    Returns:
+        Cleaned notes string
+    """
+    if not notes:
+        return ''
+
+    # Check if this already looks like markdown (not HTML)
+    # If it has code blocks, image syntax, etc., preserve it as-is
+    if (re.search(r'```[\s\S]*```', notes) or
+        re.search(r'!\[[^\]]*\]\([^)]+\)', notes) or
+        re.search(r'\[image:data:image/', notes) or
+        re.search(r'\{\{IMAGE:data:image/', notes)):
+        # Already markdown-formatted, just clean up Qt CSS
+        text = notes.replace('p, li { white-space: pre-wrap; }', '')
+        return text.strip()
+
+    # First convert old thumbnail format to new format
+    # This ensures we only extract the full image, not separate thumbnails
+    notes = convert_old_thumbnail_format(notes)
+
+    # Extract embedded images from Qt HTML before stripping tags
+    # Qt sends images as: <a href="data:image/png;base64,..."><img src="..."/></a>
+    # After conversion, href and src are the same (full image), so deduplicate
+    extracted_images = []
+    seen_images = set()
+
+    # Match anchor tags with data:image hrefs (Qt format) - prefer href as it's the full image
+    for match in re.finditer(r'<a\s+[^>]*href=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>', notes, re.IGNORECASE):
+        img_data = match.group(1)
+        if img_data not in seen_images:
+            extracted_images.append(img_data)
+            seen_images.add(img_data)
+
+    # Also match img tags with data URIs (only add if not already seen from anchor)
+    for match in re.finditer(r'<img\s+[^>]*src=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>', notes, re.IGNORECASE):
+        img_data = match.group(1)
+        if img_data not in seen_images:
+            extracted_images.append(img_data)
+            seen_images.add(img_data)
+
+    # Handle Qt rich text HTML - convert to plain text
+    # Strip HTML tags
+    text = re.sub(r'<[^>]+>', '', notes)
+    # Decode HTML entities
+    text = html_lib.unescape(text)
+    # Remove Qt rich text CSS that leaks through
+    text = text.replace('p, li { white-space: pre-wrap; }', '')
+    # Clean up "image" link text that Qt leaves behind
+    text = re.sub(r'\bimage\b\s*', '', text, flags=re.IGNORECASE)
+    text = text.strip()
+
+    # Append extracted images in a format the renderer understands
+    if extracted_images:
+        for data_uri in extracted_images:
+            text += "\n\n{{IMAGE:" + data_uri + "}}"
+        text = text.strip()
+
+    return text
+
+
 def compute_version_hash(results_data: dict, attached_logs: list = None) -> str:
     """
     Compute a hash of the version results and attached logs to detect changes.
+
+    This hash is used for server-side deduplication. The PHP server uses
+    the same algorithm, so the hashes MUST match between Python and PHP.
+
+    The notes are cleaned to match PHP's cleanNotes() before hashing,
+    ensuring the hash of the data to be stored is compared.
 
     Args:
         results_data: The results dict for a single version (test results)
@@ -362,13 +504,23 @@ def compute_version_hash(results_data: dict, attached_logs: list = None) -> str:
     Returns:
         SHA256 hash string of the data
     """
+    # Clean notes to match PHP's cleanNotes() function before hashing
+    # This ensures the hash is computed on the same data that gets stored
+    cleaned_results = {}
+    for test_key, test_data in results_data.items():
+        cleaned_results[test_key] = {
+            'status': test_data.get('status', ''),
+            'notes': clean_notes(test_data.get('notes', ''))
+        }
+
     # Create a deterministic representation of the data
     data_to_hash = {
-        'results': results_data,
+        'results': cleaned_results,
         'logs': attached_logs or []
     }
     # Sort keys to ensure consistent ordering
-    json_str = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=True)
+    # Use separators without spaces to match PHP's json_encode() output
+    json_str = json.dumps(data_to_hash, sort_keys=True, ensure_ascii=True, separators=(',', ':'))
     return hashlib.sha256(json_str.encode('utf-8')).hexdigest()
 
 
@@ -820,29 +972,99 @@ class VersionPage(QWidget):
         # Save session first to ensure latest data
         self.controller.save_session()
 
-        # Determine which versions have changed since last upload
+        # Determine which versions have changed since last upload (local check)
         results = self.controller.session.get('results', {})
         attached_logs = self.controller.session.get('attached_logs', {})
         upload_hashes = self.controller.session.get('upload_hashes', {})
+        meta = self.controller.session.get('meta', {})
 
-        changed_versions = []
+        # Compute current hashes for all versions
+        version_hashes = {}
         for vid, vid_results in results.items():
             vid_logs = attached_logs.get(vid, [])
-            current_hash = compute_version_hash(vid_results, vid_logs)
+            version_hashes[vid] = compute_version_hash(vid_results, vid_logs)
+
+        # Find versions that have changed locally
+        locally_changed = []
+        for vid, current_hash in version_hashes.items():
             last_hash = upload_hashes.get(vid)
-
             if current_hash != last_hash:
-                changed_versions.append(vid)
+                locally_changed.append(vid)
 
-        if not changed_versions:
+        if not locally_changed:
             QMessageBox.information(self, "No Changes",
                 "No changes detected since last upload.\n\n"
                 "All reports are already up to date on the panel.")
             return
 
-        # Build a filtered session with only changed versions
+        # Check hashes against the server to see what actually needs uploading
+        # This prevents uploading if the server already has the same content
+        hashes_to_check = {vid: version_hashes[vid] for vid in locally_changed}
+
+        # Build test_type from WAN/LAN flags
+        test_type = ''
+        if meta.get('WAN') and meta.get('LAN'):
+            test_type = 'WAN/LAN'
+        elif meta.get('WAN'):
+            test_type = 'WAN'
+        elif meta.get('LAN'):
+            test_type = 'LAN'
+
+        tester = meta.get('tester', '')
+        commit_hash = meta.get('commit', '')
+
+        # Check with server
+        hash_check_result = self.controller.panel.check_hashes(
+            hashes_to_check, tester, test_type, commit_hash
+        )
+
+        if not hash_check_result.success:
+            # If server check fails, fall back to uploading all locally changed versions
+            QMessageBox.warning(self, "Server Check Failed",
+                f"Could not check hashes with server: {hash_check_result.error}\n\n"
+                f"Proceeding to upload all {len(locally_changed)} changed version(s).")
+            changed_versions = locally_changed
+            skipped_versions = []
+        else:
+            # Filter based on server response
+            changed_versions = []
+            skipped_versions = []
+
+            for vid in locally_changed:
+                if vid in hash_check_result.results:
+                    result = hash_check_result.results[vid]
+                    if result.action == 'skip':
+                        # Server has the same hash, skip this version
+                        skipped_versions.append(vid)
+                        # Update local hash to match (in case it was stale)
+                        upload_hashes[vid] = version_hashes[vid]
+                    else:
+                        # Need to upload (create or update)
+                        changed_versions.append(vid)
+                else:
+                    # Version not in response, upload it
+                    changed_versions.append(vid)
+
+            # Update session with any skipped hashes
+            if skipped_versions:
+                self.controller.session['upload_hashes'] = upload_hashes
+                self.controller.save_session()
+
+        # Show message if all versions were skipped
+        if not changed_versions:
+            QMessageBox.information(self, "Already Up to Date",
+                f"All {len(skipped_versions)} report(s) already exist on the server with identical content.\n\n"
+                f"No upload needed.")
+            return
+
+        # Show info about skipped versions if any
+        skip_info = ""
+        if skipped_versions:
+            skip_info = f"\n\n{len(skipped_versions)} version(s) skipped (already up to date on server)."
+
+        # Build a filtered session with only versions that need uploading
         filtered_session = {
-            'meta': self.controller.session.get('meta', {}),
+            'meta': meta,
             'results': {vid: results[vid] for vid in changed_versions},
             'timing': {vid: self.controller.session.get('timing', {}).get(vid, 0) for vid in changed_versions},
             'completed': {vid: self.controller.session.get('completed', {}).get(vid, False) for vid in changed_versions},
@@ -866,7 +1088,8 @@ class VersionPage(QWidget):
         QMessageBox.information(self, "Uploading",
             f"Uploading {len(changed_versions)} changed report(s) to panel...\n\n"
             f"Versions: {', '.join(changed_versions[:5])}" +
-            (f"\n...and {len(changed_versions) - 5} more" if len(changed_versions) > 5 else ""))
+            (f"\n...and {len(changed_versions) - 5} more" if len(changed_versions) > 5 else "") +
+            skip_info)
 
     def check_retests(self):
         """Manually check for pending retests."""
@@ -1335,7 +1558,9 @@ class TestPage(QWidget):
             if r:
                 status = r.get('status', '')
                 # notes are stored as HTML (may include embedded images)
-                notes.setHtml(r.get('notes', ''))
+                # convert old thumbnail format (separate thumb image) to new format (resized full image)
+                notes_html = convert_old_thumbnail_format(r.get('notes', ''))
+                notes.setHtml(notes_html)
                 if status:
                     for b in group.buttons():
                         if b.text() == status:
@@ -2431,6 +2656,8 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
                 r = saved.get(tnum, {})
                 status = r.get('status', '')
                 raw_notes = r.get('notes', '') or ''
+                # convert old thumbnail format (separate thumb image) to new format (resized full image)
+                raw_notes = convert_old_thumbnail_format(raw_notes)
                 # if notes appear to already be HTML (contains tags, code blocks, or embedded image), use directly
                 if '<img' in raw_notes or '<pre' in raw_notes or '<code' in raw_notes or '<p' in raw_notes or '<br' in raw_notes or '&lt;' in raw_notes:
                     notes = raw_notes

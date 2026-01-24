@@ -273,6 +273,41 @@ class SubmitResult:
 
 
 @dataclass
+class HashCheckVersionResult:
+    """Result of hash check for a single version."""
+    exists: bool
+    hash_matches: bool
+    server_hash: Optional[str]
+    report_id: Optional[int]
+    revision_count: int
+    action: str  # 'skip', 'update', or 'create'
+
+
+@dataclass
+class HashCheckResult:
+    """Result of checking report hashes with the server."""
+    success: bool
+    results: Dict[str, HashCheckVersionResult] = field(default_factory=dict)
+    error: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'HashCheckResult':
+        if data.get('success'):
+            results = {}
+            for version_id, version_data in data.get('results', {}).items():
+                results[version_id] = HashCheckVersionResult(
+                    exists=version_data.get('exists', False),
+                    hash_matches=version_data.get('hash_matches', False),
+                    server_hash=version_data.get('server_hash'),
+                    report_id=version_data.get('report_id'),
+                    revision_count=version_data.get('revision_count', 0),
+                    action=version_data.get('action', 'create')
+                )
+            return cls(success=True, results=results)
+        return cls(success=False, error=data.get('error', 'Unknown error'))
+
+
+@dataclass
 class Revision:
     """Represents a Git revision/commit."""
     sha: str
@@ -573,6 +608,56 @@ class TestPanelClient:
             return SubmitResult(success=False, error="Request timed out")
         except requests.exceptions.RequestException as e:
             return SubmitResult(success=False, error=str(e))
+
+    def check_hashes(self, hashes: Dict[str, str], tester: str, test_type: str,
+                     commit_hash: Optional[str] = None) -> HashCheckResult:
+        """
+        Check if report hashes exist on the server.
+
+        This is used to determine which reports need to be submitted:
+        - 'skip': Report exists with matching hash, no need to submit
+        - 'update': Report exists but hash differs, submit as new revision
+        - 'create': Report doesn't exist, submit as new report
+
+        Args:
+            hashes: Dict mapping version_id to content hash
+            tester: Tester name
+            test_type: Test type (WAN, LAN, WAN/LAN)
+            commit_hash: Optional commit hash
+
+        Returns:
+            HashCheckResult with per-version results
+        """
+        try:
+            data = {
+                'hashes': hashes,
+                'tester': tester,
+                'test_type': test_type
+            }
+            if commit_hash:
+                data['commit_hash'] = commit_hash
+
+            response = self._make_request('POST', '/api/check_hash.php', data=data)
+
+            try:
+                result = response.json()
+            except json.JSONDecodeError:
+                return HashCheckResult(success=False, error="Invalid JSON response from server")
+
+            if response.status_code == 200:
+                return HashCheckResult.from_dict(result)
+            else:
+                return HashCheckResult(
+                    success=False,
+                    error=result.get('error', f"HTTP {response.status_code}")
+                )
+
+        except requests.exceptions.ConnectionError:
+            return HashCheckResult(success=False, error="Could not connect to API")
+        except requests.exceptions.Timeout:
+            return HashCheckResult(success=False, error="Request timed out")
+        except requests.exceptions.RequestException as e:
+            return HashCheckResult(success=False, error=str(e))
 
     def get_retest_queue(self, client_version: Optional[str] = None) -> List[RetestItem]:
         """

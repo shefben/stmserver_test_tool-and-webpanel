@@ -44,7 +44,7 @@ class Database {
      * Insert a new report (automatically handles revisions)
      * Different commit hashes are treated as separate reports
      */
-    public function insertReport($tester, $commitHash, $testType, $clientVersion, $rawJson, $testDuration = null, $steamuiVersion = null, $steamPkgVersion = null) {
+    public function insertReport($tester, $commitHash, $testType, $clientVersion, $rawJson, $testDuration = null, $steamuiVersion = null, $steamPkgVersion = null, $contentHash = null) {
         // Check for existing report with same tester+version+test_type+commit_hash
         // Different commit hashes will create new reports instead of updating existing ones
         $existingReport = $this->findExistingReport($tester, $clientVersion, $testType, $commitHash);
@@ -63,10 +63,11 @@ class Database {
                     test_duration = ?,
                     steamui_version = ?,
                     steam_pkg_version = ?,
+                    content_hash = ?,
                     revision_count = revision_count + 1
                 WHERE id = ?
             ");
-            $stmt->execute([$commitHash, $rawJson, $testDuration, $steamuiVersion, $steamPkgVersion, $existingReport['id']]);
+            $stmt->execute([$commitHash, $rawJson, $testDuration, $steamuiVersion, $steamPkgVersion, $contentHash, $existingReport['id']]);
 
             // Delete old test results for this report
             $stmt = $this->pdo->prepare("DELETE FROM test_results WHERE report_id = ?");
@@ -77,12 +78,21 @@ class Database {
 
         // Create new report
         $stmt = $this->pdo->prepare("
-            INSERT INTO reports (tester, commit_hash, test_type, client_version, submitted_at, raw_json, test_duration, steamui_version, steam_pkg_version, revision_count)
-            VALUES (?, ?, ?, ?, NOW(), ?, ?, ?, ?, 0)
+            INSERT INTO reports (tester, commit_hash, test_type, client_version, submitted_at, raw_json, content_hash, test_duration, steamui_version, steam_pkg_version, revision_count)
+            VALUES (?, ?, ?, ?, NOW(), ?, ?, ?, ?, ?, 0)
         ");
-        $stmt->execute([$tester, $commitHash, $testType, $clientVersion, $rawJson, $testDuration, $steamuiVersion, $steamPkgVersion]);
+        $stmt->execute([$tester, $commitHash, $testType, $clientVersion, $rawJson, $contentHash, $testDuration, $steamuiVersion, $steamPkgVersion]);
 
         return $this->pdo->lastInsertId();
+    }
+
+    /**
+     * Update the content hash for a report
+     * Called after test results have been inserted to compute the final hash
+     */
+    public function updateReportContentHash($reportId, $contentHash) {
+        $stmt = $this->pdo->prepare("UPDATE reports SET content_hash = ? WHERE id = ?");
+        return $stmt->execute([$contentHash, $reportId]);
     }
 
     /**

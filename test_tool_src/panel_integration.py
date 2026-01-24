@@ -442,6 +442,35 @@ class PanelIntegration(QObject):
         self._check_for_retests()
         return self._last_retests
 
+    def check_hashes(self, hashes: dict, tester: str, test_type: str,
+                     commit_hash: str = None):
+        """
+        Check if report hashes exist on the server.
+
+        This is used to determine which reports need to be submitted:
+        - 'skip': Report exists with matching hash, no need to submit
+        - 'update': Report exists but hash differs, submit as new revision
+        - 'create': Report doesn't exist, submit as new report
+
+        Args:
+            hashes: Dict mapping version_id to content hash
+            tester: Tester name
+            test_type: Test type (WAN, LAN, WAN/LAN)
+            commit_hash: Optional commit hash
+
+        Returns:
+            HashCheckResult with per-version results
+        """
+        if self._offline_mode:
+            from api_client import HashCheckResult
+            return HashCheckResult(success=False, error="Offline mode - restart to check hashes")
+
+        if not self.is_configured:
+            from api_client import HashCheckResult
+            return HashCheckResult(success=False, error="Not configured")
+
+        return self._client.check_hashes(hashes, tester, test_type, commit_hash)
+
     def get_cached_retests(self) -> List[RetestNotification]:
         """Get the last fetched retests without making a new request."""
         return self._last_retests

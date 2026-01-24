@@ -8,6 +8,23 @@ require_once __DIR__ . '/../includes/db.php';
 
 $db = Database::getInstance();
 
+// Handle delete action (admin only)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_report') {
+    if (isAdmin()) {
+        $reportId = intval($_POST['report_id'] ?? 0);
+        if ($reportId > 0 && $db->deleteReport($reportId)) {
+            setFlash('success', "Report #$reportId deleted successfully.");
+        } else {
+            setFlash('error', "Failed to delete report.");
+        }
+    } else {
+        setFlash('error', "You do not have permission to delete reports.");
+    }
+    // Redirect to prevent form resubmission
+    header('Location: ?page=reports');
+    exit;
+}
+
 // Pagination
 $page = max(1, intval($_GET['p'] ?? 1));
 $perPage = 20;
@@ -303,6 +320,14 @@ if (!empty($reportIds)) {
                                     <a href="?page=retest_report&id=<?= $report['id'] ?>" class="btn btn-sm btn-secondary" onclick="event.stopPropagation();" title="Request retest for this report">
                                         Retest
                                     </a>
+                                    <?php if (isAdmin()): ?>
+                                        <button type="button" class="btn btn-sm btn-danger btn-delete-report"
+                                                data-report-id="<?= $report['id'] ?>"
+                                                onclick="event.stopPropagation(); deleteReport(<?= $report['id'] ?>);"
+                                                title="Delete this report">
+                                            Delete
+                                        </button>
+                                    <?php endif; ?>
                                 </div>
                             </td>
                         </tr>
@@ -542,5 +567,22 @@ if (!empty($reportIds)) {
     box-shadow: 0 2px 5px rgba(0,0,0,0.3);
 }
 </style>
+
+<?php if (isAdmin()): ?>
+<!-- Delete Report Form (hidden) -->
+<form id="deleteReportForm" method="POST" action="?page=reports" style="display: none;">
+    <input type="hidden" name="action" value="delete_report">
+    <input type="hidden" name="report_id" id="deleteReportId">
+</form>
+
+<script>
+function deleteReport(reportId) {
+    if (confirm('Delete report #' + reportId + '? This action cannot be undone.')) {
+        document.getElementById('deleteReportId').value = reportId;
+        document.getElementById('deleteReportForm').submit();
+    }
+}
+</script>
+<?php endif; ?>
 
 <?php require_once __DIR__ . '/../includes/footer.php'; ?>
