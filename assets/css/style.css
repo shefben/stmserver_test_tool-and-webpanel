@@ -997,6 +997,40 @@ tr:hover td {
   white-space: nowrap;
 }
 
+/* When notes are rendered with rich content, allow wrapping for thumbnails */
+.notes-cell.rich-notes-rendered {
+  white-space: normal;
+  overflow: visible;
+}
+
+/* Keep thumbnail images small in the table cell */
+.notes-cell .note-image-wrapper {
+  display: inline-block;
+  margin: 2px 4px 2px 0;
+}
+
+.notes-cell .note-image {
+  max-width: 50px;
+  max-height: 40px;
+  border-width: 1px;
+  vertical-align: middle;
+}
+
+.notes-cell .note-image-wrapper::after {
+  display: none;
+}
+
+/* Hide code blocks in table cells - too large */
+.notes-cell .code-block-wrapper {
+  display: none;
+}
+
+/* Show inline code in table cells */
+.notes-cell .inline-code {
+  font-size: 11px;
+  padding: 1px 4px;
+}
+
 .notes-full {
   background: #3e4637;
   padding: 12px;
@@ -1914,5 +1948,568 @@ tr:hover td {
   .notes-view-modal-body .note-image {
     max-width: 120px;
     max-height: 120px;
+  }
+}
+
+/*** Clickable Test Rows ***/
+.test-row {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.test-row:hover {
+  background-color: rgba(196, 181, 80, 0.08);
+}
+
+.test-row:hover td {
+  border-color: rgba(196, 181, 80, 0.3);
+}
+
+/*** Test Detail Modal ***/
+.test-detail-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 25000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: modalFadeIn 0.2s ease-out;
+  backdrop-filter: blur(4px);
+}
+
+.test-detail-modal-content {
+  background: var(--bg-card, #3e4637);
+  border: 2px solid var(--border-color, #5a6a50);
+  border-radius: 10px;
+  width: 90%;
+  max-width: 800px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.test-detail-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border-color, #5a6a50);
+  background: var(--bg-dark, #282e22);
+  gap: 16px;
+}
+
+.test-detail-modal-header h3 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--text-light, #eff6ee);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.test-detail-modal-header .test-key-badge {
+  background: var(--primary, #c4b550);
+  color: #1e2218;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.test-detail-modal-close {
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  background: transparent;
+  border: 1px solid var(--border-color, #5a6a50);
+  color: var(--text-muted, #a0aa95);
+  font-size: 24px;
+  font-weight: bold;
+  cursor: pointer;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.test-detail-modal-close:hover {
+  background: #c45050;
+  border-color: #c45050;
+  color: white;
+}
+
+.test-detail-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.test-detail-section {
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border-color, #5a6a50);
+}
+
+.test-detail-section:last-child {
+  border-bottom: none;
+}
+
+.test-detail-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted, #a0aa95);
+  margin-bottom: 8px;
+}
+
+.test-detail-expected {
+  color: var(--text-color, #d8ded3);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.test-detail-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.test-detail-status .status-badge {
+  font-size: 14px;
+  padding: 6px 14px;
+}
+
+.test-detail-notes {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-color, #d8ded3);
+}
+
+.test-detail-notes.empty-notes {
+  color: var(--text-muted, #a0aa95);
+  font-style: italic;
+}
+
+/* Images in test detail modal - thumbnail with click to enlarge */
+.test-detail-notes .note-image-wrapper {
+  margin: 12px 8px 12px 0;
+  display: inline-block;
+  vertical-align: top;
+}
+
+.test-detail-notes .note-image {
+  max-width: 150px;
+  max-height: 150px;
+  object-fit: cover;
+}
+
+/* Code blocks in test detail modal */
+.test-detail-notes .code-block-wrapper {
+  margin: 12px 0;
+}
+
+.test-detail-notes .code-block {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* Responsive for test detail modal */
+@media (max-width: 768px) {
+  .test-detail-modal-content {
+    width: 95%;
+    max-height: 90vh;
+  }
+
+  .test-detail-modal-header {
+    padding: 16px;
+  }
+
+  .test-detail-section {
+    padding: 12px 16px;
+  }
+
+  .test-detail-notes .note-image {
+    max-width: 120px;
+    max-height: 120px;
+  }
+}
+
+/*** Notes Cell Thumbnail Preview ***/
+.notes-cell .notes-thumbnail-preview {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.notes-cell .notes-thumbnail-preview img {
+  max-width: 40px;
+  max-height: 30px;
+  border: 1px solid #5a6a50;
+  border-radius: 3px;
+  object-fit: cover;
+  vertical-align: middle;
+}
+
+.notes-cell .notes-text-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+/*** GitHub Floating Download Box ***/
+.github-floating-box {
+  position: fixed;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 1000;
+  background: #4c5844;
+  border-top: solid 1px #899281;
+  border-bottom: solid 1px #292d23;
+  border-left: solid 1px #899281;
+  border-right: solid 1px #292d23;
+  padding: 12px 16px;
+  min-width: 180px;
+  max-width: 220px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.github-floating-box-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #a0aa95;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.github-floating-box-title svg {
+  width: 14px;
+  height: 14px;
+  stroke: #a0aa95;
+}
+
+.github-floating-box-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.github-revision-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #c4b550;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.github-revision-link:hover {
+  color: #E3E41F;
+  text-decoration: none;
+}
+
+.github-revision-link .revision-sha {
+  font-family: 'Consolas', 'Courier New', monospace;
+  background: #3e4637;
+  padding: 2px 6px;
+  border: 1px solid #292d23;
+}
+
+.github-revision-link .revision-info-icon {
+  font-size: 12px;
+  color: #a0aa95;
+  margin-left: auto;
+}
+
+.github-download-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: #4c5844;
+  color: white;
+  padding: 6px 10px;
+  font-size: 12px;
+  text-decoration: none;
+  border-top: solid 1px #899281;
+  border-bottom: solid 1px #292d23;
+  border-left: solid 1px #899281;
+  border-right: solid 1px #292d23;
+  transition: all 0.2s;
+}
+
+.github-download-link:hover {
+  background: #5a6a50;
+  color: #E3E41F;
+  text-decoration: none;
+}
+
+.github-download-link:active {
+  border-top: solid 1px #292d23;
+  border-bottom: solid 1px #899281;
+  border-left: solid 1px #292d23;
+  border-right: solid 1px #899281;
+}
+
+.github-download-link svg {
+  width: 14px;
+  height: 14px;
+}
+
+/*** GitHub Revision Detail Modal ***/
+.github-revision-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 26000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+.github-revision-modal.active {
+  display: flex;
+  animation: modalFadeIn 0.2s ease-out;
+}
+
+.github-revision-modal-content {
+  background: #4c5844;
+  border-top: solid 2px #899281;
+  border-bottom: solid 2px #292d23;
+  border-left: solid 2px #899281;
+  border-right: solid 2px #292d23;
+  width: 90%;
+  max-width: 700px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.github-revision-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #5a6a50;
+  background: #3e4637;
+  gap: 12px;
+}
+
+.github-revision-modal-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #c4b550;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.github-revision-modal-header .revision-sha-badge {
+  font-family: 'Consolas', 'Courier New', monospace;
+  background: #4c5844;
+  padding: 4px 10px;
+  border: 1px solid #5a6a50;
+  font-size: 14px;
+  color: #d8ded3;
+}
+
+.github-revision-modal-close {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  background: transparent;
+  border: 1px solid #5a6a50;
+  color: #a0aa95;
+  font-size: 20px;
+  font-weight: bold;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  padding: 0;
+}
+
+.github-revision-modal-close:hover {
+  background: #c45050;
+  border-color: #c45050;
+  color: white;
+}
+
+.github-revision-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.github-revision-section {
+  padding: 16px 20px;
+  border-bottom: 1px solid #5a6a50;
+}
+
+.github-revision-section:last-child {
+  border-bottom: none;
+}
+
+.github-revision-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #a0aa95;
+  margin-bottom: 8px;
+}
+
+.github-revision-message {
+  color: #d8ded3;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.github-revision-date {
+  color: #a0aa95;
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.github-revision-files {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.github-revision-file-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.github-revision-file-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.github-revision-file-group-title.added {
+  color: #7ea64b;
+}
+
+.github-revision-file-group-title.removed {
+  color: #c45050;
+}
+
+.github-revision-file-group-title.modified {
+  color: #c4b550;
+}
+
+.github-revision-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 12px;
+  color: #b8c4ad;
+  max-height: 200px;
+  overflow-y: auto;
+  background: #3e4637;
+  border: 1px solid #292d23;
+  padding: 8px 12px;
+}
+
+.github-revision-file-list li {
+  padding: 2px 0;
+  word-break: break-all;
+}
+
+.github-revision-file-list li::before {
+  content: none;
+}
+
+.github-revision-no-files {
+  color: #75806f;
+  font-style: italic;
+  font-size: 13px;
+}
+
+.github-revision-modal-footer {
+  padding: 12px 20px;
+  border-top: 1px solid #5a6a50;
+  background: #3e4637;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.github-revision-modal-footer .btn {
+  min-width: auto;
+}
+
+/* Hide floating box on smaller screens where it would overlap content */
+@media (max-width: 1600px) {
+  .github-floating-box {
+    right: 10px;
+    padding: 10px 12px;
+    min-width: 160px;
+    max-width: 180px;
+  }
+}
+
+@media (max-width: 1400px) {
+  .github-floating-box {
+    /* Move to bottom-right corner instead of side */
+    top: auto;
+    bottom: 20px;
+    transform: none;
+    right: 20px;
+  }
+}
+
+@media (max-width: 768px) {
+  .github-floating-box {
+    display: none;
+  }
+}
+
+/* Responsive for revision modal */
+@media (max-width: 768px) {
+  .github-revision-modal-content {
+    width: 95%;
+    max-height: 90vh;
+  }
+
+  .github-revision-modal-header {
+    padding: 12px 16px;
+  }
+
+  .github-revision-section {
+    padding: 12px 16px;
   }
 }

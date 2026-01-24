@@ -171,8 +171,15 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
     // Expandable notes - show in rich modal instead of alert
+    // Note: For test rows, clicking anywhere on the row opens the test detail modal
+    // Notes cells in non-test-row tables still get their own click handler
     const noteCells = document.querySelectorAll('.notes-cell');
     noteCells.forEach(cell => {
+        // Skip if this cell is inside a test-row (test detail modal handles it)
+        if (cell.closest('.test-row')) {
+            return;
+        }
+
         if (cell.scrollWidth > cell.clientWidth || cell.getAttribute('data-full')) {
             cell.style.cursor = 'pointer';
             cell.title = 'Click to view full notes';
@@ -1002,6 +1009,145 @@ const RichNotesRenderer = {
         if (/https?:\/\/[^\s]+/.test(content)) return true;
 
         return false;
+    },
+
+    /**
+     * Open test detail modal showing full test information
+     * @param {Object} testData - Object with test details
+     */
+    openTestDetailModal: function(testData) {
+        // Remove any existing test detail modal
+        const existingModal = document.getElementById('test-detail-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        // Render the notes content
+        const notesContent = testData.notes || '';
+        const renderedNotes = notesContent ? this.render(notesContent) : '<span class="empty-notes">No notes</span>';
+
+        // Create status badge HTML
+        const statusBadgeHtml = testData.statusBadge || this.createStatusBadge(testData.status);
+
+        // Create modal
+        const modal = document.createElement('div');
+        modal.id = 'test-detail-modal';
+        modal.className = 'test-detail-modal';
+
+        modal.innerHTML =
+            '<div class="test-detail-modal-content">' +
+                '<div class="test-detail-modal-header">' +
+                    '<h3>' +
+                        '<span class="test-key-badge">' + this.escapeHtml(testData.testKey) + '</span>' +
+                        '<span>' + this.escapeHtml(testData.testName) + '</span>' +
+                    '</h3>' +
+                    '<button type="button" class="test-detail-modal-close" title="Close">&times;</button>' +
+                '</div>' +
+                '<div class="test-detail-modal-body">' +
+                    '<div class="test-detail-section">' +
+                        '<div class="test-detail-section-title">Expected Result</div>' +
+                        '<div class="test-detail-expected">' + this.escapeHtml(testData.expected || '-') + '</div>' +
+                    '</div>' +
+                    '<div class="test-detail-section">' +
+                        '<div class="test-detail-section-title">Status</div>' +
+                        '<div class="test-detail-status">' + statusBadgeHtml + '</div>' +
+                    '</div>' +
+                    '<div class="test-detail-section">' +
+                        '<div class="test-detail-section-title">Notes</div>' +
+                        '<div class="test-detail-notes rich-notes-rendered' + (notesContent ? '' : ' empty-notes') + '">' +
+                            renderedNotes +
+                        '</div>' +
+                    '</div>' +
+                '</div>' +
+            '</div>';
+
+        // Close button handler
+        modal.querySelector('.test-detail-modal-close').addEventListener('click', function() {
+            modal.remove();
+        });
+
+        // Close on backdrop click
+        modal.addEventListener('click', function(e) {
+            if (e.target === modal) {
+                modal.remove();
+            }
+        });
+
+        document.body.appendChild(modal);
+
+        // Close on Escape
+        const closeOnEscape = function(e) {
+            if (e.key === 'Escape') {
+                modal.remove();
+                document.removeEventListener('keydown', closeOnEscape);
+            }
+        };
+        document.addEventListener('keydown', closeOnEscape);
+    },
+
+    /**
+     * Create a status badge HTML string
+     */
+    createStatusBadge: function(status) {
+        const statusClasses = {
+            'Working': 'status-working',
+            'Semi-working': 'status-semi',
+            'Not working': 'status-not-working',
+            'N/A': 'status-na'
+        };
+        const className = statusClasses[status] || 'status-na';
+        return '<span class="status-badge ' + className + '">' + this.escapeHtml(status || 'N/A') + '</span>';
+    },
+
+    /**
+     * Initialize clickable test rows
+     */
+    initTestRowClicks: function() {
+        const testRows = document.querySelectorAll('.test-row');
+        const self = this;
+
+        testRows.forEach(function(row) {
+            row.addEventListener('click', function(e) {
+                // Don't trigger if clicking a link, button, or interactive element
+                const target = e.target;
+                if (target.closest('a') || target.closest('button') || target.tagName === 'A' || target.tagName === 'BUTTON') {
+                    return;
+                }
+
+                // Extract test data from the row
+                const cells = row.querySelectorAll('td');
+                if (cells.length < 4) return;
+
+                // Get test key from first cell
+                const testKeyLink = cells[0].querySelector('.test-key-link');
+                const testKey = testKeyLink ? testKeyLink.textContent.trim() : cells[0].textContent.trim();
+
+                // Get test name and expected from second cell
+                const testNameDiv = cells[1].querySelector('div:first-child');
+                const expectedDiv = cells[1].querySelector('div:nth-child(2)');
+                const testName = testNameDiv ? testNameDiv.textContent.trim() : '';
+                const expected = expectedDiv ? expectedDiv.textContent.trim() : '';
+
+                // Get status from third cell
+                const statusBadge = cells[2].querySelector('.status-badge');
+                const status = statusBadge ? statusBadge.textContent.trim() : 'N/A';
+                const statusBadgeHtml = statusBadge ? statusBadge.outerHTML : '';
+
+                // Get notes from fourth cell
+                const notesCell = cells[3];
+                const notes = notesCell.getAttribute('data-full') || '';
+
+                // Open the modal
+                self.openTestDetailModal({
+                    testKey: testKey,
+                    testName: testName,
+                    expected: expected,
+                    status: status,
+                    statusBadge: statusBadgeHtml,
+                    notes: notes
+                });
+            });
+        });
     }
 };
 
@@ -1010,5 +1156,234 @@ document.addEventListener('DOMContentLoaded', function() {
     // Delay slightly to ensure all elements are ready
     setTimeout(function() {
         RichNotesRenderer.init();
+        RichNotesRenderer.initTestRowClicks();
     }, 100);
+});
+
+/**
+ * GitHub Floating Box and Revision Modal
+ * Displays latest revision with download link
+ */
+var GitHubFloatingBox = {
+    modal: null,
+    currentRevision: null,
+
+    /**
+     * Initialize the floating box modal functionality
+     */
+    init: function() {
+        var self = this;
+
+        // Get the modal element
+        this.modal = document.getElementById('github-revision-modal');
+        if (!this.modal) return;
+
+        // Close button
+        var closeBtn = this.modal.querySelector('.github-revision-modal-close');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', function() {
+                self.closeModal();
+            });
+        }
+
+        // Close on backdrop click
+        this.modal.addEventListener('click', function(e) {
+            if (e.target === self.modal) {
+                self.closeModal();
+            }
+        });
+
+        // Close on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape' && self.modal.classList.contains('active')) {
+                self.closeModal();
+            }
+        });
+
+        // Setup revision link click handler
+        var revisionLink = document.querySelector('.github-revision-link');
+        if (revisionLink) {
+            revisionLink.addEventListener('click', function(e) {
+                e.preventDefault();
+                self.fetchAndShowRevisionDetails();
+            });
+        }
+    },
+
+    /**
+     * Fetch revision details from API and show modal
+     */
+    fetchAndShowRevisionDetails: function() {
+        var self = this;
+
+        // Show loading state
+        this.showModal({
+            sha: '...',
+            message: 'Loading...',
+            date: '',
+            files: { added: [], removed: [], modified: [] }
+        });
+
+        // Fetch from API
+        fetch('api/github_zip.php?action=info')
+            .then(function(response) {
+                return response.json();
+            })
+            .then(function(data) {
+                if (data.success && data.data && data.data.latest_revision) {
+                    var rev = data.data.latest_revision;
+                    self.showModal({
+                        sha: rev.sha,
+                        short_sha: rev.short_sha,
+                        message: rev.message || 'No commit message',
+                        date: rev.date || '',
+                        files: rev.files || { added: [], removed: [], modified: [] },
+                        download_url: data.data.download_url
+                    });
+                } else {
+                    self.showModal({
+                        sha: 'Error',
+                        message: data.error || 'Failed to load revision details',
+                        date: '',
+                        files: { added: [], removed: [], modified: [] }
+                    });
+                }
+            })
+            .catch(function(error) {
+                self.showModal({
+                    sha: 'Error',
+                    message: 'Failed to fetch revision: ' + error.message,
+                    date: '',
+                    files: { added: [], removed: [], modified: [] }
+                });
+            });
+    },
+
+    /**
+     * Show the revision detail modal
+     */
+    showModal: function(revision) {
+        if (!this.modal) return;
+
+        this.currentRevision = revision;
+
+        // Update SHA badge
+        var shaBadge = this.modal.querySelector('.revision-sha-badge');
+        if (shaBadge) {
+            shaBadge.textContent = revision.short_sha || revision.sha.substring(0, 8);
+        }
+
+        // Update message
+        var messageEl = this.modal.querySelector('.github-revision-message');
+        if (messageEl) {
+            messageEl.textContent = revision.message;
+        }
+
+        // Update date
+        var dateEl = this.modal.querySelector('.github-revision-date');
+        if (dateEl) {
+            dateEl.textContent = revision.date ? 'Committed: ' + revision.date : '';
+            dateEl.style.display = revision.date ? 'block' : 'none';
+        }
+
+        // Update files section
+        this.updateFilesSection(revision.files);
+
+        // Update download button if present
+        var downloadBtn = this.modal.querySelector('.github-download-btn');
+        if (downloadBtn && revision.download_url) {
+            downloadBtn.href = revision.download_url;
+        }
+
+        // Show modal
+        this.modal.classList.add('active');
+        document.body.style.overflow = 'hidden';
+    },
+
+    /**
+     * Update the files changed section
+     */
+    updateFilesSection: function(files) {
+        var self = this;
+        var filesContainer = this.modal.querySelector('.github-revision-files');
+        if (!filesContainer) return;
+
+        var hasFiles = (files.added && files.added.length > 0) ||
+                       (files.removed && files.removed.length > 0) ||
+                       (files.modified && files.modified.length > 0);
+
+        if (!hasFiles) {
+            filesContainer.innerHTML = '<div class="github-revision-no-files">No file details available for this commit</div>';
+            return;
+        }
+
+        var html = '';
+
+        // Added files
+        if (files.added && files.added.length > 0) {
+            html += '<div class="github-revision-file-group">';
+            html += '<div class="github-revision-file-group-title added">';
+            html += '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>';
+            html += ' Added (' + files.added.length + ')';
+            html += '</div>';
+            html += '<ul class="github-revision-file-list">';
+            files.added.forEach(function(file) {
+                html += '<li>' + self.escapeHtml(file) + '</li>';
+            });
+            html += '</ul></div>';
+        }
+
+        // Removed files
+        if (files.removed && files.removed.length > 0) {
+            html += '<div class="github-revision-file-group">';
+            html += '<div class="github-revision-file-group-title removed">';
+            html += '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/></svg>';
+            html += ' Removed (' + files.removed.length + ')';
+            html += '</div>';
+            html += '<ul class="github-revision-file-list">';
+            files.removed.forEach(function(file) {
+                html += '<li>' + self.escapeHtml(file) + '</li>';
+            });
+            html += '</ul></div>';
+        }
+
+        // Modified files
+        if (files.modified && files.modified.length > 0) {
+            html += '<div class="github-revision-file-group">';
+            html += '<div class="github-revision-file-group-title modified">';
+            html += '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+            html += ' Modified (' + files.modified.length + ')';
+            html += '</div>';
+            html += '<ul class="github-revision-file-list">';
+            files.modified.forEach(function(file) {
+                html += '<li>' + self.escapeHtml(file) + '</li>';
+            });
+            html += '</ul></div>';
+        }
+
+        filesContainer.innerHTML = html;
+    },
+
+    /**
+     * Close the modal
+     */
+    closeModal: function() {
+        if (!this.modal) return;
+        this.modal.classList.remove('active');
+        document.body.style.overflow = '';
+    },
+
+    /**
+     * Escape HTML entities
+     */
+    escapeHtml: function(text) {
+        var div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+};
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    GitHubFloatingBox.init();
 });

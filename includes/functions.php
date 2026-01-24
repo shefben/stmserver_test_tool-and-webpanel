@@ -71,20 +71,29 @@ function cleanNotes($notes) {
     }
 
     // Extract embedded images from Qt HTML before stripping tags
-    // Qt sends images as: <a href="data:image/png;base64,...">image</a>
+    // Qt sends images as: <a href="data:image/png;base64,..."><img src="..."/></a>
+    // Old format had different images for href (full) and src (thumbnail)
+    // New format has same image in both. We deduplicate to only keep full images.
     $extractedImages = [];
+    $seenImages = [];
 
-    // Match anchor tags with data:image hrefs (Qt format)
+    // Match anchor tags with data:image hrefs (Qt format) - prefer href as it's the full image
     if (preg_match_all('/<a\s+[^>]*href=["\']?(data:image\/[^"\'>\s]+)["\']?[^>]*>/i', $notes, $matches)) {
         foreach ($matches[1] as $dataUri) {
-            $extractedImages[] = $dataUri;
+            if (!in_array($dataUri, $seenImages)) {
+                $extractedImages[] = $dataUri;
+                $seenImages[] = $dataUri;
+            }
         }
     }
 
-    // Also match img tags with data URIs
+    // Also match img tags with data URIs (only add if not already seen - avoids duplicate thumbnails)
     if (preg_match_all('/<img\s+[^>]*src=["\']?(data:image\/[^"\'>\s]+)["\']?[^>]*>/i', $notes, $matches)) {
         foreach ($matches[1] as $dataUri) {
-            $extractedImages[] = $dataUri;
+            if (!in_array($dataUri, $seenImages)) {
+                $extractedImages[] = $dataUri;
+                $seenImages[] = $dataUri;
+            }
         }
     }
 
@@ -537,4 +546,66 @@ function getRevisionDropdownOptions() {
     }
 
     return $options;
+}
+
+/**
+ * Get latest GitHub revision info for the floating box
+ * Returns array with latest revision and download info, or null if not configured
+ */
+function getLatestGitHubRevisionInfo() {
+    if (!isGitHubConfigured()) {
+        return null;
+    }
+
+    $revisions = getGitHubRevisions();
+    if (empty($revisions)) {
+        return null;
+    }
+
+    // Get the first (latest) revision
+    $latestSha = array_key_first($revisions);
+    $latestCommit = $revisions[$latestSha];
+
+    return [
+        'sha' => $latestSha,
+        'short_sha' => substr($latestSha, 0, 8),
+        'message' => $latestCommit['notes'] ?? '',
+        'timestamp' => $latestCommit['ts'] ?? 0,
+        'date' => isset($latestCommit['ts']) ? date('Y-m-d H:i:s', $latestCommit['ts']) : null,
+        'files' => $latestCommit['files'] ?? [
+            'added' => [],
+            'removed' => [],
+            'modified' => []
+        ],
+        'owner' => GITHUB_OWNER,
+        'repo' => GITHUB_REPO
+    ];
+}
+
+/**
+ * Check if current page should show the GitHub floating box
+ * Returns false for admin and profile pages
+ */
+function shouldShowGitHubFloatingBox() {
+    $currentPage = getCurrentPage();
+
+    // List of pages where the floating box should NOT be shown
+    $excludedPages = [
+        'admin',
+        'admin_users',
+        'admin_reports',
+        'admin_retests',
+        'admin_tests',
+        'admin_templates',
+        'admin_categories',
+        'admin_test_types',
+        'admin_tags',
+        'admin_versions',
+        'admin_version_notifications',
+        'admin_invites',
+        'admin_settings',
+        'profile'
+    ];
+
+    return !in_array($currentPage, $excludedPages);
 }
