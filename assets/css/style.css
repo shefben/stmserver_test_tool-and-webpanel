@@ -2171,8 +2171,8 @@ tr:hover td {
 /*** GitHub Floating Download Box ***/
 .github-floating-box {
   position: fixed;
-  right: 20px;
-  top: 50%;
+  right: 100px;
+  top: 25%;
   transform: translateY(-50%);
   z-index: 1000;
   background: #4c5844;

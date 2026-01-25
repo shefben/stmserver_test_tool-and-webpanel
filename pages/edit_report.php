@@ -325,10 +325,10 @@ $clientVersion = $report['client_version'];
                                             </select>
                                         </td>
                                         <td>
-                                            <input type="text" name="notes[<?= $resultId ?>]"
-                                                   value="<?= e($currentNotes) ?>"
-                                                   placeholder="Optional notes"
-                                                   class="notes-input">
+                                            <textarea name="notes[<?= $resultId ?>]"
+                                                      placeholder="Optional notes (supports markdown, code blocks, images)"
+                                                      class="notes-input notes-textarea"
+                                                      rows="2"><?= e($currentNotes) ?></textarea>
                                         </td>
                                         <?php if (isAdmin()): ?>
                                             <td>
@@ -410,6 +410,22 @@ $clientVersion = $report['client_version'];
     background: var(--bg-dark);
     color: var(--text);
     font-size: 13px;
+}
+
+/* Notes textarea for multi-line support */
+.notes-textarea {
+    min-height: 40px;
+    max-height: 200px;
+    resize: vertical;
+    font-family: inherit;
+    line-height: 1.4;
+    white-space: pre-wrap;
+}
+
+.notes-textarea:focus {
+    border-color: var(--primary);
+    outline: none;
+    min-height: 80px;
 }
 
 /* Alert styles */

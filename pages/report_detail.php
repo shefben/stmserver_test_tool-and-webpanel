@@ -363,7 +363,13 @@ $versionNotifications = $db->getNotificationsForVersionString(
                                 <?php endif; ?>
                             </td>
                             <td>
-                                <a href="?page=results&test_key=<?= urlencode($testKey) ?>" class="test-name-link">
+                                <a href="javascript:void(0)" class="test-name-link test-detail-trigger"
+                                   data-test-key="<?= e($testKey) ?>"
+                                   data-test-name="<?= e($testInfo['name']) ?>"
+                                   data-test-expected="<?= e($testInfo['expected']) ?>"
+                                   data-test-status="<?= e($status) ?>"
+                                   data-test-notes="<?= e($notes) ?>"
+                                   data-test-category="<?= e($categoryName) ?>">
                                     <div style="font-weight: 500;"><?= e($testInfo['name']) ?></div>
                                     <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">
                                         <?= e($testInfo['expected']) ?>
@@ -416,7 +422,18 @@ $versionNotifications = $db->getNotificationsForVersionString(
         Raw JSON Data <span style="font-size: 12px; color: var(--text-muted);">(click to toggle)</span>
     </h3>
     <div id="rawJson" class="hidden">
-        <pre style="background: var(--bg-dark); padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 12px; color: var(--text-muted);"><?= e($report['raw_json']) ?></pre>
+        <?php
+        // Format the raw JSON for better readability
+        $rawJsonData = $report['raw_json'];
+        $formattedJson = $rawJsonData;
+        if (!empty($rawJsonData)) {
+            $decoded = json_decode($rawJsonData, true);
+            if ($decoded !== null) {
+                $formattedJson = json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            }
+        }
+        ?>
+        <pre style="background: var(--bg-dark); padding: 15px; border-radius: 6px; overflow-x: auto; font-size: 12px; color: var(--text-muted); white-space: pre-wrap; word-wrap: break-word;"><?= e($formattedJson) ?></pre>
     </div>
 </div>
 
@@ -2581,6 +2598,265 @@ document.addEventListener('DOMContentLoaded', function() {
                 cell.removeAttribute('title');
             }
         });
+    }
+});
+</script>
+
+<!-- Test Detail Modal -->
+<div id="test-detail-modal" class="test-detail-overlay" style="display: none;">
+    <div class="test-detail-modal">
+        <div class="test-detail-header">
+            <h3 id="test-detail-title">Test Details</h3>
+            <button type="button" class="test-detail-close" onclick="closeTestDetailModal()">&times;</button>
+        </div>
+        <div class="test-detail-body">
+            <div class="test-detail-section">
+                <label>Test Key</label>
+                <div class="test-detail-value" id="test-detail-key"></div>
+            </div>
+            <div class="test-detail-section">
+                <label>Category</label>
+                <div class="test-detail-value" id="test-detail-category"></div>
+            </div>
+            <div class="test-detail-section">
+                <label>Test Name</label>
+                <div class="test-detail-value" id="test-detail-name"></div>
+            </div>
+            <div class="test-detail-section">
+                <label>Expected Behavior</label>
+                <div class="test-detail-value" id="test-detail-expected"></div>
+            </div>
+            <div class="test-detail-section">
+                <label>Status</label>
+                <div class="test-detail-value" id="test-detail-status"></div>
+            </div>
+            <div class="test-detail-section" id="test-detail-notes-section">
+                <label>Notes</label>
+                <div class="test-detail-value test-detail-notes" id="test-detail-notes"></div>
+            </div>
+        </div>
+        <div class="test-detail-footer">
+            <a href="#" id="test-detail-filter-link" class="btn btn-sm">View All Results for This Test</a>
+            <button type="button" class="btn btn-sm btn-secondary" onclick="closeTestDetailModal()">Close</button>
+        </div>
+    </div>
+</div>
+
+<style>
+.test-detail-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.75);
+    z-index: 10001;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.test-detail-modal {
+    background: var(--bg-card);
+    border-radius: 8px;
+    width: 90%;
+    max-width: 600px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 50px rgba(0, 0, 0, 0.6);
+    border-top: solid 2px #899281;
+    border-bottom: solid 2px #292d23;
+    border-left: solid 2px #899281;
+    border-right: solid 2px #292d23;
+    animation: testDetailSlideIn 0.2s ease-out;
+}
+
+@keyframes testDetailSlideIn {
+    from {
+        opacity: 0;
+        transform: scale(0.95) translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+.test-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-accent);
+    border-radius: 6px 6px 0 0;
+}
+
+.test-detail-header h3 {
+    margin: 0;
+    color: var(--primary);
+    font-size: 18px;
+}
+
+.test-detail-close {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 28px;
+    cursor: pointer;
+    padding: 0 8px;
+    line-height: 1;
+}
+
+.test-detail-close:hover {
+    color: #c45050;
+}
+
+.test-detail-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.test-detail-section {
+    margin-bottom: 16px;
+}
+
+.test-detail-section:last-child {
+    margin-bottom: 0;
+}
+
+.test-detail-section label {
+    display: block;
+    color: var(--text-muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+}
+
+.test-detail-value {
+    color: var(--text);
+    font-size: 15px;
+    line-height: 1.5;
+    padding: 10px 12px;
+    background: var(--bg-dark);
+    border-radius: 4px;
+    border: 1px solid var(--border);
+}
+
+.test-detail-notes {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.test-detail-footer {
+    padding: 15px 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
+</style>
+
+<script>
+// Event delegation for test detail triggers
+document.addEventListener('click', function(e) {
+    var trigger = e.target.closest('.test-detail-trigger');
+    if (trigger) {
+        e.preventDefault();
+        showTestDetailModal(
+            trigger.getAttribute('data-test-key'),
+            trigger.getAttribute('data-test-name'),
+            trigger.getAttribute('data-test-expected'),
+            trigger.getAttribute('data-test-status'),
+            trigger.getAttribute('data-test-notes'),
+            trigger.getAttribute('data-test-category')
+        );
+    }
+});
+
+function showTestDetailModal(testKey, testName, expected, status, notes, category) {
+    document.getElementById('test-detail-title').textContent = 'Test Details: ' + testKey;
+    document.getElementById('test-detail-key').textContent = testKey;
+    document.getElementById('test-detail-name').textContent = testName;
+    document.getElementById('test-detail-expected').textContent = expected;
+    document.getElementById('test-detail-category').textContent = category;
+
+    // Set status with badge styling
+    var statusBadge = getStatusBadgeHtml(status);
+    document.getElementById('test-detail-status').innerHTML = statusBadge;
+
+    // Show/hide notes section
+    var notesSection = document.getElementById('test-detail-notes-section');
+    var notesEl = document.getElementById('test-detail-notes');
+    if (notes && notes.trim() !== '') {
+        notesSection.style.display = 'block';
+        // Check if notes have rich content
+        if (typeof RichNotesRenderer !== 'undefined' && RichNotesRenderer.hasRichContent(notes)) {
+            notesEl.innerHTML = RichNotesRenderer.render(notes);
+        } else {
+            notesEl.textContent = notes;
+        }
+    } else {
+        notesSection.style.display = 'none';
+    }
+
+    // Set filter link
+    document.getElementById('test-detail-filter-link').href = '?page=results&test_key=' + encodeURIComponent(testKey);
+
+    // Show modal
+    document.getElementById('test-detail-modal').style.display = 'flex';
+
+    // Add keyboard handler
+    document.addEventListener('keydown', testDetailKeyHandler);
+}
+
+function closeTestDetailModal() {
+    document.getElementById('test-detail-modal').style.display = 'none';
+    document.removeEventListener('keydown', testDetailKeyHandler);
+}
+
+function testDetailKeyHandler(e) {
+    if (e.key === 'Escape') {
+        closeTestDetailModal();
+    }
+}
+
+function getStatusBadgeHtml(status) {
+    var statusLower = status.toLowerCase();
+    var className = 'status-badge ';
+
+    if (statusLower === 'pass' || statusLower === 'passed') {
+        className += 'status-pass';
+    } else if (statusLower === 'fail' || statusLower === 'failed') {
+        className += 'status-fail';
+    } else if (statusLower === 'partial') {
+        className += 'status-partial';
+    } else if (statusLower === 'n/a' || statusLower === 'na' || statusLower === 'skipped') {
+        className += 'status-na';
+    } else {
+        className += 'status-unknown';
+    }
+
+    return '<span class="' + className + '">' + escapeHtmlTestDetail(status) + '</span>';
+}
+
+function escapeHtmlTestDetail(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Close on overlay click
+document.getElementById('test-detail-modal')?.addEventListener('click', function(e) {
+    if (e.target === this) {
+        closeTestDetailModal();
     }
 });
 </script>

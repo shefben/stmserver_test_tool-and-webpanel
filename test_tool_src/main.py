@@ -467,6 +467,30 @@ def clean_notes(notes: str) -> str:
             extracted_images.append(img_data)
             seen_images.add(img_data)
 
+    # Convert HTML <pre><code> blocks to markdown code blocks BEFORE stripping tags
+    # This preserves code blocks that were created in the Qt editor
+    extracted_code_blocks = []
+
+    def extract_code_block(match):
+        # Extract code content from <pre><code> block
+        code_html = match.group(1)
+        # Strip inner HTML tags (like syntax highlighting spans)
+        code_text = re.sub(r'<[^>]+>', '', code_html)
+        # Decode HTML entities
+        code_text = html_lib.unescape(code_text)
+        # Store placeholder and actual code
+        placeholder = f"__CODE_BLOCK_{len(extracted_code_blocks)}__"
+        extracted_code_blocks.append(code_text)
+        return placeholder
+
+    # Match <pre...><code>...</code></pre> blocks (with optional attributes and whitespace)
+    notes = re.sub(
+        r'<pre[^>]*>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>',
+        extract_code_block,
+        notes,
+        flags=re.IGNORECASE
+    )
+
     # Handle Qt rich text HTML - convert to plain text
     # Strip HTML tags
     text = re.sub(r'<[^>]+>', '', notes)
@@ -476,6 +500,17 @@ def clean_notes(notes: str) -> str:
     text = text.replace('p, li { white-space: pre-wrap; }', '')
     # Clean up "image" link text that Qt leaves behind
     text = re.sub(r'\bimage\b\s*', '', text, flags=re.IGNORECASE)
+    text = text.strip()
+
+    # Replace code block placeholders with markdown code blocks
+    for i, code_text in enumerate(extracted_code_blocks):
+        placeholder = f"__CODE_BLOCK_{i}__"
+        # Convert to markdown code block format
+        markdown_block = f"\n```\n{code_text}\n```\n"
+        text = text.replace(placeholder, markdown_block)
+
+    # Clean up multiple newlines that may result from replacements
+    text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
 
     # Append extracted images in a format the renderer understands
@@ -887,12 +922,21 @@ class VersionPage(QWidget):
         self.upload_btn.setStyleSheet("background-color:#27ae60;color:white;")
         self.retests_btn = QPushButton("Check Retests")
         self.retests_btn.setStyleSheet("background-color:#3498db;color:white;")
+        self.pending_label = QLabel("")
+        self.pending_label.setStyleSheet("color:#e67e22;font-weight:bold;")
+        self.pending_label.setVisible(False)
+        self.retry_btn = QPushButton("Retry")
+        self.retry_btn.setStyleSheet("background-color:#e67e22;color:white;")
+        self.retry_btn.setVisible(False)
+        self.retry_btn.setToolTip("Retry sending queued submissions")
         layout.addWidget(QLabel("Select a Steam version to test:"))
         layout.addWidget(self.list_widget)
         hl = QHBoxLayout()
         hl.addWidget(self.reload_btn)
         hl.addWidget(self.retests_btn)
         hl.addStretch()
+        hl.addWidget(self.pending_label)
+        hl.addWidget(self.retry_btn)
         hl.addWidget(self.upload_btn)
         hl.addWidget(self.export_btn)
         layout.addLayout(hl)
@@ -903,6 +947,7 @@ class VersionPage(QWidget):
         self.reload_btn.clicked.connect(self.controller.load_session)
         self.upload_btn.clicked.connect(self.upload_to_panel)
         self.retests_btn.clicked.connect(self.check_retests)
+        self.retry_btn.clicked.connect(self.retry_pending_submissions)
         # Update button states based on panel availability
         self._update_panel_buttons()
 
@@ -949,18 +994,75 @@ class VersionPage(QWidget):
             self.list_widget.addItem(item)
 
     def _update_panel_buttons(self):
-        """Update panel button states based on availability."""
+        """Update panel button states based on availability and pending submissions."""
         if PANEL_AVAILABLE and self.controller.panel and self.controller.panel.is_configured:
             self.upload_btn.setEnabled(True)
             self.retests_btn.setEnabled(True)
             self.upload_btn.setToolTip("Upload results to Test Panel")
             self.retests_btn.setToolTip("Check for pending retests")
+
+            # Show pending submissions count
+            pending_count = 0
+            if hasattr(self.controller.panel, 'get_pending_submissions_count'):
+                pending_count = self.controller.panel.get_pending_submissions_count()
+
+            if pending_count > 0:
+                self.pending_label.setText(f"📤 {pending_count} pending")
+                self.pending_label.setVisible(True)
+                self.retry_btn.setVisible(True)
+                self.retry_btn.setToolTip(f"Retry sending {pending_count} queued report(s)")
+            else:
+                self.pending_label.setVisible(False)
+                self.retry_btn.setVisible(False)
         else:
             self.upload_btn.setEnabled(False)
             self.retests_btn.setEnabled(False)
+            self.pending_label.setVisible(False)
+            self.retry_btn.setVisible(False)
             tip = "Panel not configured - create test_panel_config.json" if PANEL_AVAILABLE else "Panel integration not available"
             self.upload_btn.setToolTip(tip)
             self.retests_btn.setToolTip(tip)
+
+    def retry_pending_submissions(self):
+        """Retry sending all pending submissions."""
+        if not self.controller.panel or not self.controller.panel.is_configured:
+            return
+
+        if not hasattr(self.controller.panel, 'retry_pending_submissions'):
+            return
+
+        pending_count = self.controller.panel.get_pending_submissions_count()
+        if pending_count == 0:
+            QMessageBox.information(self, "No Pending", "No pending submissions to retry.")
+            self._update_panel_buttons()
+            return
+
+        reply = QMessageBox.question(self, "Retry Submissions",
+            f"Retry sending {pending_count} pending submission(s)?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+
+        if reply != QMessageBox.Yes:
+            return
+
+        result = self.controller.panel.retry_pending_submissions()
+        succeeded = result.get('succeeded', 0)
+        failed = result.get('failed', 0)
+
+        if succeeded > 0 and failed == 0:
+            QMessageBox.information(self, "Success",
+                f"Successfully sent {succeeded} report(s).")
+        elif succeeded > 0 and failed > 0:
+            QMessageBox.warning(self, "Partial Success",
+                f"Sent {succeeded} report(s), but {failed} failed.\n\n"
+                f"Failed submissions will remain in the queue for later retry.")
+        elif failed > 0:
+            QMessageBox.warning(self, "Still Offline",
+                f"Could not send any reports. {failed} submission(s) remain queued.\n\n"
+                f"Check your internet connection and try again.")
+        else:
+            QMessageBox.information(self, "No Change", "No submissions were processed.")
+
+        self._update_panel_buttons()
 
     def upload_to_panel(self):
         """Upload session results to the test panel, only uploading changed reports."""
@@ -972,11 +1074,16 @@ class VersionPage(QWidget):
         # Save session first to ensure latest data
         self.controller.save_session()
 
-        # Determine which versions have changed since last upload (local check)
+        # Determine which versions need to be uploaded
         results = self.controller.session.get('results', {})
         attached_logs = self.controller.session.get('attached_logs', {})
         upload_hashes = self.controller.session.get('upload_hashes', {})
         meta = self.controller.session.get('meta', {})
+
+        if not results:
+            QMessageBox.warning(self, "No Results",
+                "No test results to submit. Please complete some tests first.")
+            return
 
         # Compute current hashes for all versions
         version_hashes = {}
@@ -984,22 +1091,20 @@ class VersionPage(QWidget):
             vid_logs = attached_logs.get(vid, [])
             version_hashes[vid] = compute_version_hash(vid_results, vid_logs)
 
-        # Find versions that have changed locally
+        # Find versions that have changed locally (for informational purposes)
         locally_changed = []
+        locally_unchanged = []
         for vid, current_hash in version_hashes.items():
             last_hash = upload_hashes.get(vid)
             if current_hash != last_hash:
                 locally_changed.append(vid)
+            else:
+                locally_unchanged.append(vid)
 
-        if not locally_changed:
-            QMessageBox.information(self, "No Changes",
-                "No changes detected since last upload.\n\n"
-                "All reports are already up to date on the panel.")
-            return
-
-        # Check hashes against the server to see what actually needs uploading
-        # This prevents uploading if the server already has the same content
-        hashes_to_check = {vid: version_hashes[vid] for vid in locally_changed}
+        # ALWAYS check with the server for ALL versions
+        # This handles the case where a report was deleted on the server
+        # (local hash matches, but server no longer has the report)
+        hashes_to_check = version_hashes.copy()
 
         # Build test_type from WAN/LAN flags
         test_type = ''
@@ -1020,32 +1125,41 @@ class VersionPage(QWidget):
 
         if not hash_check_result.success:
             # If server check fails, fall back to uploading all locally changed versions
+            if not locally_changed:
+                QMessageBox.information(self, "No Changes",
+                    "No local changes detected and could not verify with server.\n\n"
+                    f"Error: {hash_check_result.error}")
+                return
             QMessageBox.warning(self, "Server Check Failed",
                 f"Could not check hashes with server: {hash_check_result.error}\n\n"
                 f"Proceeding to upload all {len(locally_changed)} changed version(s).")
             changed_versions = locally_changed
             skipped_versions = []
         else:
-            # Filter based on server response
+            # Filter based on server response - check ALL versions, not just locally changed
+            # This handles the case where a report was deleted on the server
             changed_versions = []
             skipped_versions = []
 
-            for vid in locally_changed:
+            for vid in version_hashes.keys():
                 if vid in hash_check_result.results:
                     result = hash_check_result.results[vid]
                     if result.action == 'skip':
-                        # Server has the same hash, skip this version
+                        # Server has the same hash, truly skip this version
                         skipped_versions.append(vid)
-                        # Update local hash to match (in case it was stale)
+                        # Update local hash to match
                         upload_hashes[vid] = version_hashes[vid]
+                    elif result.action == 'create':
+                        # Report doesn't exist on server (new or was deleted)
+                        changed_versions.append(vid)
                     else:
-                        # Need to upload (create or update)
+                        # 'update' - report exists but hash differs
                         changed_versions.append(vid)
                 else:
                     # Version not in response, upload it
                     changed_versions.append(vid)
 
-            # Update session with any skipped hashes
+            # Update session with skipped hashes
             if skipped_versions:
                 self.controller.session['upload_hashes'] = upload_hashes
                 self.controller.save_session()
@@ -1478,13 +1592,14 @@ class TestPage(QWidget):
         self.current_test_index = 0  # Reset current test index
 
         # Try to get version-specific tests from API (uses version-specific template if assigned)
-        version_tests = self.controller.get_tests_for_version(version['id'])
+        version_tests, api_skip_tests = self.controller.get_tests_for_version(version['id'])
         if version_tests is not None:
-            # Use version-specific tests (template already filters the tests)
+            # Use version-specific tests from API
             tests_to_show = version_tests
-            skip = set()  # No additional skip needed, template already filtered
+            # Use skip_tests from API (synced with admin_versions settings)
+            skip = api_skip_tests if api_skip_tests else set()
         else:
-            # Fall back to global TESTS with skip_tests filtering
+            # Fall back to global TESTS with skip_tests filtering from local version data
             tests_to_show = TESTS
             skip = set(version.get('skip_tests', []))
 
@@ -1992,8 +2107,8 @@ class Controller:
     def _load_tests_from_api(self):
         """Load test types from the API and update the global TESTS list.
 
-        If the API is configured but not reachable, sets offline_mode to True
-        and uses fallback tests.
+        If the API is configured but not reachable, uses cached data if available,
+        otherwise falls back to FALLBACK_TESTS. Sets offline_mode accordingly.
         """
         global TESTS
         if not self.panel or not self.panel.is_configured:
@@ -2002,20 +2117,7 @@ class Controller:
             self.offline_mode = False  # Not offline, just not configured
             return False
 
-        # Test connection first
-        try:
-            if not self.panel.test_connection():
-                print("API not reachable, entering offline mode with fallback tests")
-                TESTS = list(FALLBACK_TESTS)
-                self.offline_mode = True
-                return False
-        except Exception as e:
-            print(f"Connection test failed: {e}, entering offline mode with fallback tests")
-            TESTS = list(FALLBACK_TESTS)
-            self.offline_mode = True
-            return False
-
-        # Connection successful, try to load tests
+        # Try to load tests (API or cached)
         try:
             result = self.panel.get_tests(enabled_only=True)
             if result and result.success and result.tests:
@@ -2029,17 +2131,25 @@ class Controller:
                         test.description or ''
                     ))
                 TESTS = new_tests
-                print(f"Loaded {len(TESTS)} tests from API")
-                self.offline_mode = False
-                return True
+
+                # Check if this is cached data (offline mode)
+                if result.error and "cached" in result.error.lower():
+                    print(f"Loaded {len(TESTS)} tests from cache (offline)")
+                    self.offline_mode = True
+                    return True  # Still successful, just using cached data
+                else:
+                    print(f"Loaded {len(TESTS)} tests from API")
+                    self.offline_mode = False
+                    return True
             else:
+                # No tests available from API or cache
                 error = result.error if result else "Unknown error"
-                print(f"Failed to load tests from API: {error}, entering offline mode with fallback tests")
+                print(f"Failed to load tests: {error}, using fallback tests")
                 TESTS = list(FALLBACK_TESTS)
                 self.offline_mode = True
                 return False
         except Exception as e:
-            print(f"Error loading tests from API: {e}, entering offline mode with fallback tests")
+            print(f"Error loading tests: {e}, using fallback tests")
             TESTS = list(FALLBACK_TESTS)
             self.offline_mode = True
             return False
@@ -2051,14 +2161,18 @@ class Controller:
     def get_tests_for_version(self, version_id: str):
         """Get tests for a specific version using version-specific template if assigned.
 
+        Uses cached data when offline if available.
+
         Args:
             version_id: The client version string (e.g., 'secondblob.bin.2004-01-15')
 
         Returns:
-            List of tests in (test_key, test_name, description) format, or None if offline/error
+            Tuple of (tests_list, skip_tests_set) or (None, None) if not available
+            - tests_list: List of tests in (test_key, test_name, description) format
+            - skip_tests_set: Set of test keys to skip (from admin_versions settings)
         """
-        if not self.panel or not self.panel.is_configured or self.offline_mode:
-            return None
+        if not self.panel or not self.panel.is_configured:
+            return None, None
 
         try:
             result = self.panel.get_tests(enabled_only=True, client_version=version_id)
@@ -2070,18 +2184,32 @@ class Controller:
                         test.name,
                         test.description or ''
                     ))
+
+                # Check if this is cached data
+                is_cached = result.error and "cached" in result.error.lower()
+
                 if result.template:
-                    print(f"Using template '{result.template.get('name', 'Unknown')}' for version {version_id} ({len(tests)} tests)")
-                return tests
-            return None
+                    source = "cache" if is_cached else "API"
+                    print(f"Using template '{result.template.get('name', 'Unknown')}' for version {version_id} ({len(tests)} tests, from {source})")
+                elif is_cached:
+                    print(f"Using cached tests for version {version_id} ({len(tests)} tests)")
+
+                # Get skip_tests from the API response (synced with admin_versions settings)
+                skip_tests = set(result.skip_tests) if result.skip_tests else set()
+                if skip_tests:
+                    print(f"  Skip tests from version settings: {', '.join(sorted(skip_tests))}")
+
+                return tests, skip_tests
+            return None, None
         except Exception as e:
             print(f"Error getting tests for version {version_id}: {e}")
-            return None
+            return None, None
 
     def _load_versions_from_api(self):
         """Load client versions from the API and update the global API_VERSIONS list.
 
-        If the API is configured but not reachable, uses fallback VERSIONS from file.
+        If the API is configured but not reachable, uses cached versions if available,
+        otherwise falls back to VERSIONS from file.
         """
         global API_VERSIONS
         if not self.panel or not self.panel.is_configured:
@@ -2089,14 +2217,8 @@ class Controller:
             API_VERSIONS = None  # Will use VERSIONS from versions.py
             return False
 
-        # Connection should already be tested by _load_tests_from_api
-        if self.offline_mode:
-            print("Offline mode, using fallback versions from file")
-            API_VERSIONS = None
-            return False
-
         try:
-            # Get versions with notifications included
+            # Get versions with notifications included (uses cache if offline)
             result = self.panel.get_versions(enabled_only=True, include_notifications=True)
             if result and result.success and result.versions:
                 # Convert API ClientVersion objects to the same format as VERSIONS
@@ -2124,7 +2246,12 @@ class Controller:
                     new_versions.append(version_dict)
 
                 API_VERSIONS = new_versions
-                print(f"Loaded {len(API_VERSIONS)} client versions from API")
+
+                # Check if this is cached data (offline mode)
+                if result.error and "cached" in result.error.lower():
+                    print(f"Loaded {len(API_VERSIONS)} client versions from cache (offline)")
+                else:
+                    print(f"Loaded {len(API_VERSIONS)} client versions from API")
 
                 # Count total notifications
                 total_notifs = sum(len(v.get('notifications', [])) for v in API_VERSIONS)
@@ -2134,11 +2261,11 @@ class Controller:
                 return True
             else:
                 error = result.error if result else "Unknown error"
-                print(f"Failed to load versions from API: {error}, using fallback versions")
+                print(f"Failed to load versions: {error}, using fallback versions from file")
                 API_VERSIONS = None
                 return False
         except Exception as e:
-            print(f"Error loading versions from API: {e}, using fallback versions")
+            print(f"Error loading versions: {e}, using fallback versions from file")
             API_VERSIONS = None
             return False
 
@@ -2148,17 +2275,36 @@ class Controller:
         msg.setIcon(QMessageBox.Warning)
         msg.setWindowTitle("Offline Mode")
         msg.setText("Could not connect to the Test Panel API.")
-        msg.setInformativeText(
-            "The tool is running in offline mode.\n\n"
-            "You can still perform testing, but your results will NOT be "
-            "automatically uploaded to the panel.\n\n"
-            "To submit your test results:\n"
-            "1. Complete your testing as usual\n"
-            "2. Export your results to an HTML report\n"
-            "3. Manually upload the report through the web panel using a browser\n\n"
-            "The tool will use the default test definitions until a connection "
-            "can be established."
-        )
+
+        # Check if cached data is available
+        has_cache = self.panel and self.panel.has_cached_data() if hasattr(self.panel, 'has_cached_data') else False
+        pending_count = self.panel.get_pending_submissions_count() if self.panel and hasattr(self.panel, 'get_pending_submissions_count') else 0
+
+        if has_cache:
+            info_text = (
+                "The tool is running in offline mode with cached data.\n\n"
+                "You can continue testing using previously cached test definitions "
+                "and client versions.\n\n"
+                "When you submit results:\n"
+                "• Reports will be queued locally for later submission\n"
+                "• Once the connection is restored, queued reports will be sent automatically\n"
+            )
+            if pending_count > 0:
+                info_text += f"\n📤 {pending_count} report(s) currently pending submission."
+        else:
+            info_text = (
+                "The tool is running in offline mode.\n\n"
+                "You can still perform testing, but your results will NOT be "
+                "automatically uploaded to the panel.\n\n"
+                "To submit your test results:\n"
+                "1. Complete your testing as usual\n"
+                "2. Export your results to an HTML report\n"
+                "3. Manually upload the report through the web panel using a browser\n\n"
+                "The tool will use the default test definitions until a connection "
+                "can be established."
+            )
+
+        msg.setInformativeText(info_text)
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec_()
 

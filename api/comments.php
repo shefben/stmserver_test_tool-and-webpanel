@@ -4,11 +4,38 @@
  * Handles AJAX operations for blog-style comments on reports
  */
 
+// Suppress PHP error display to prevent HTML in JSON response
+ini_set('display_errors', 0);
+error_reporting(E_ALL);
+
+// Set JSON header early
+header('Content-Type: application/json');
+
+// Custom error handler to return JSON errors
+set_error_handler(function($errno, $errstr, $errfile, $errline) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'error' => 'Server error occurred',
+        'debug' => defined('DEBUG_MODE') && DEBUG_MODE ? "$errstr in $errfile:$errline" : null
+    ]);
+    exit;
+});
+
+// Custom exception handler
+set_exception_handler(function($e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'error' => 'Server error occurred',
+        'debug' => defined('DEBUG_MODE') && DEBUG_MODE ? $e->getMessage() : null
+    ]);
+    exit;
+});
+
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/functions.php';
-
-header('Content-Type: application/json');
 
 // Check authentication
 if (!isLoggedIn()) {

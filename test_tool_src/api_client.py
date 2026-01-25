@@ -138,6 +138,7 @@ class TestsResult:
     grouped: Dict[str, List[TestType]] = field(default_factory=dict)
     error: Optional[str] = None
     template: Optional[Dict[str, any]] = None  # Template info if version-specific template was applied
+    skip_tests: List[str] = field(default_factory=list)  # Tests to skip for this version (from admin_versions settings)
 
 
 @dataclass
@@ -400,6 +401,323 @@ class NotificationsResult:
     error: Optional[str] = None
 
 
+@dataclass
+class PendingSubmission:
+    """Represents a report waiting to be submitted when online."""
+    id: str  # Unique ID for this submission
+    file_path: str  # Path to the session results JSON file
+    data: Dict[str, Any]  # The actual report data
+    created_at: str  # ISO timestamp when queued
+    attempts: int = 0  # Number of submission attempts
+    last_error: Optional[str] = None  # Last error message
+
+    def to_dict(self) -> dict:
+        return {
+            'id': self.id,
+            'file_path': self.file_path,
+            'data': self.data,
+            'created_at': self.created_at,
+            'attempts': self.attempts,
+            'last_error': self.last_error
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'PendingSubmission':
+        return cls(
+            id=data.get('id', ''),
+            file_path=data.get('file_path', ''),
+            data=data.get('data', {}),
+            created_at=data.get('created_at', ''),
+            attempts=data.get('attempts', 0),
+            last_error=data.get('last_error')
+        )
+
+
+class DataCache:
+    """
+    Persistent cache for offline operation.
+
+    Stores versions, tests, templates, and pending submissions to allow
+    the tool to function when the API is unreachable.
+    """
+
+    CACHE_VERSION = 1  # Increment when cache format changes
+    DEFAULT_CACHE_FILE = 'test_panel_cache.json'
+
+    def __init__(self, cache_path: Optional[str] = None):
+        """
+        Initialize the data cache.
+
+        Args:
+            cache_path: Path to cache file. If None, uses default location.
+        """
+        if cache_path:
+            self.cache_path = cache_path
+        else:
+            # Store cache in same directory as config, or user home
+            self.cache_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                self.DEFAULT_CACHE_FILE
+            )
+
+        self._data = {
+            'cache_version': self.CACHE_VERSION,
+            'last_sync': None,  # ISO timestamp of last successful sync
+            'versions': [],  # List of version dicts
+            'versions_hash': None,  # Hash to detect server-side changes
+            'tests': [],  # List of test dicts (general test list)
+            'tests_hash': None,
+            'categories': [],  # List of category dicts
+            'version_tests': {},  # Dict mapping version_id -> list of test dicts (template-based)
+            'version_skip_tests': {},  # Dict mapping version_id -> list of skip test keys
+            'pending_submissions': [],  # List of PendingSubmission dicts
+            'connection_status': {
+                'is_online': False,
+                'last_online': None,
+                'last_check': None
+            }
+        }
+
+        self._dirty = False
+        self._load()
+
+    def _load(self) -> bool:
+        """Load cache from disk."""
+        if not os.path.exists(self.cache_path):
+            logger.debug(f"Cache file not found: {self.cache_path}")
+            return False
+
+        try:
+            with open(self.cache_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # Check cache version
+            if data.get('cache_version') != self.CACHE_VERSION:
+                logger.warning(f"Cache version mismatch, clearing cache")
+                return False
+
+            self._data = data
+            logger.info(f"Loaded cache from {self.cache_path}")
+
+            # Log cache status
+            if self._data.get('last_sync'):
+                logger.info(f"  Last sync: {self._data['last_sync']}")
+            if self._data.get('versions'):
+                logger.info(f"  Cached versions: {len(self._data['versions'])}")
+            if self._data.get('tests'):
+                logger.info(f"  Cached tests: {len(self._data['tests'])}")
+            pending = self._data.get('pending_submissions', [])
+            if pending:
+                logger.info(f"  Pending submissions: {len(pending)}")
+
+            return True
+        except Exception as e:
+            logger.error(f"Failed to load cache: {e}")
+            return False
+
+    def save(self) -> bool:
+        """Save cache to disk."""
+        if not self._dirty:
+            return True
+
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(self.cache_path) or '.', exist_ok=True)
+
+            with open(self.cache_path, 'w', encoding='utf-8') as f:
+                json.dump(self._data, f, indent=2)
+
+            self._dirty = False
+            logger.debug(f"Saved cache to {self.cache_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save cache: {e}")
+            return False
+
+    def _mark_dirty(self):
+        """Mark cache as needing to be saved."""
+        self._dirty = True
+
+    # =========== Versions ===========
+
+    def get_versions(self) -> List[dict]:
+        """Get cached versions."""
+        return self._data.get('versions', [])
+
+    def set_versions(self, versions: List[dict], hash_value: Optional[str] = None):
+        """Update cached versions."""
+        self._data['versions'] = versions
+        self._data['versions_hash'] = hash_value
+        self._data['last_sync'] = datetime.now().isoformat()
+        self._mark_dirty()
+
+    def get_versions_hash(self) -> Optional[str]:
+        """Get hash of cached versions for comparison."""
+        return self._data.get('versions_hash')
+
+    # =========== Tests ===========
+
+    def get_tests(self) -> List[dict]:
+        """Get cached general test list."""
+        return self._data.get('tests', [])
+
+    def get_categories(self) -> List[dict]:
+        """Get cached categories."""
+        return self._data.get('categories', [])
+
+    def set_tests(self, tests: List[dict], categories: List[dict], hash_value: Optional[str] = None):
+        """Update cached general test list."""
+        self._data['tests'] = tests
+        self._data['categories'] = categories
+        self._data['tests_hash'] = hash_value
+        self._data['last_sync'] = datetime.now().isoformat()
+        self._mark_dirty()
+
+    def get_tests_hash(self) -> Optional[str]:
+        """Get hash of cached tests for comparison."""
+        return self._data.get('tests_hash')
+
+    # =========== Version-specific tests (templates) ===========
+
+    def get_version_tests(self, version_id: str) -> Optional[List[dict]]:
+        """Get cached tests for a specific version (from template)."""
+        return self._data.get('version_tests', {}).get(version_id)
+
+    def get_version_skip_tests(self, version_id: str) -> List[str]:
+        """Get cached skip tests for a specific version."""
+        return self._data.get('version_skip_tests', {}).get(version_id, [])
+
+    def set_version_tests(self, version_id: str, tests: List[dict], skip_tests: List[str]):
+        """Cache tests for a specific version."""
+        if 'version_tests' not in self._data:
+            self._data['version_tests'] = {}
+        if 'version_skip_tests' not in self._data:
+            self._data['version_skip_tests'] = {}
+
+        self._data['version_tests'][version_id] = tests
+        self._data['version_skip_tests'][version_id] = skip_tests
+        self._mark_dirty()
+
+    def clear_version_tests(self, version_id: Optional[str] = None):
+        """Clear cached version-specific tests."""
+        if version_id:
+            self._data.get('version_tests', {}).pop(version_id, None)
+            self._data.get('version_skip_tests', {}).pop(version_id, None)
+        else:
+            self._data['version_tests'] = {}
+            self._data['version_skip_tests'] = {}
+        self._mark_dirty()
+
+    # =========== Pending Submissions ===========
+
+    def add_pending_submission(self, file_path: str, data: Dict[str, Any]) -> str:
+        """
+        Add a report to the pending submission queue.
+
+        Returns:
+            Unique ID for the pending submission
+        """
+        import uuid
+        submission_id = str(uuid.uuid4())[:8]
+
+        pending = PendingSubmission(
+            id=submission_id,
+            file_path=file_path,
+            data=data,
+            created_at=datetime.now().isoformat()
+        )
+
+        if 'pending_submissions' not in self._data:
+            self._data['pending_submissions'] = []
+
+        self._data['pending_submissions'].append(pending.to_dict())
+        self._mark_dirty()
+        self.save()  # Save immediately for pending submissions
+
+        logger.info(f"Queued report for submission: {submission_id}")
+        return submission_id
+
+    def get_pending_submissions(self) -> List[PendingSubmission]:
+        """Get all pending submissions."""
+        return [PendingSubmission.from_dict(p) for p in self._data.get('pending_submissions', [])]
+
+    def get_pending_count(self) -> int:
+        """Get count of pending submissions."""
+        return len(self._data.get('pending_submissions', []))
+
+    def remove_pending_submission(self, submission_id: str) -> bool:
+        """Remove a pending submission (after successful submission)."""
+        pending = self._data.get('pending_submissions', [])
+        for i, p in enumerate(pending):
+            if p.get('id') == submission_id:
+                pending.pop(i)
+                self._mark_dirty()
+                self.save()
+                logger.info(f"Removed pending submission: {submission_id}")
+                return True
+        return False
+
+    def update_pending_submission(self, submission_id: str, attempts: int, error: Optional[str] = None):
+        """Update a pending submission's attempt count and error."""
+        pending = self._data.get('pending_submissions', [])
+        for p in pending:
+            if p.get('id') == submission_id:
+                p['attempts'] = attempts
+                p['last_error'] = error
+                self._mark_dirty()
+                self.save()
+                return True
+        return False
+
+    # =========== Connection Status ===========
+
+    def set_online_status(self, is_online: bool):
+        """Update connection status."""
+        self._data['connection_status']['is_online'] = is_online
+        self._data['connection_status']['last_check'] = datetime.now().isoformat()
+        if is_online:
+            self._data['connection_status']['last_online'] = datetime.now().isoformat()
+        self._mark_dirty()
+
+    def is_online(self) -> bool:
+        """Get last known online status."""
+        return self._data.get('connection_status', {}).get('is_online', False)
+
+    def get_last_sync(self) -> Optional[str]:
+        """Get timestamp of last successful sync."""
+        return self._data.get('last_sync')
+
+    def has_cached_data(self) -> bool:
+        """Check if we have any cached data available."""
+        return bool(self._data.get('versions') or self._data.get('tests'))
+
+    # =========== Cache Management ===========
+
+    def clear(self):
+        """Clear all cached data (but keep pending submissions)."""
+        pending = self._data.get('pending_submissions', [])
+        self._data = {
+            'cache_version': self.CACHE_VERSION,
+            'last_sync': None,
+            'versions': [],
+            'versions_hash': None,
+            'tests': [],
+            'tests_hash': None,
+            'categories': [],
+            'version_tests': {},
+            'version_skip_tests': {},
+            'pending_submissions': pending,  # Preserve pending submissions
+            'connection_status': {
+                'is_online': False,
+                'last_online': None,
+                'last_check': None
+            }
+        }
+        self._mark_dirty()
+        self.save()
+        logger.info("Cache cleared (pending submissions preserved)")
+
+
 class TestPanelClient:
     """
     Client for the Steam Emulator Test Panel API.
@@ -417,12 +735,13 @@ class TestPanelClient:
         os.path.expanduser('~/test_panel_config.json'),
     ]
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, cache_path: Optional[str] = None):
         """
         Initialize the client with a configuration.
 
         Args:
             config: Configuration object
+            cache_path: Optional path to cache file for offline support
         """
         self.config = config
         self._check_thread: Optional[threading.Thread] = None
@@ -430,6 +749,11 @@ class TestPanelClient:
         self._retest_callbacks: List[Callable[[List[RetestItem]], None]] = []
         self._last_retest_check: Optional[datetime] = None
         self._cached_retests: List[RetestItem] = []
+
+        # Initialize data cache for offline support
+        self.cache = DataCache(cache_path)
+        self._is_online = False
+        self._online_callbacks: List[Callable[[bool], None]] = []
 
         # Validate configuration
         errors = config.validate()
@@ -533,13 +857,15 @@ class TestPanelClient:
         response = requests.request(method, url, **kwargs)
         return response
 
-    def submit_report(self, file_path: str, verbose: bool = False) -> SubmitResult:
+    def submit_report(self, file_path: str, verbose: bool = False,
+                      queue_if_offline: bool = True) -> SubmitResult:
         """
-        Submit a test report to the API.
+        Submit a test report to the API, with offline queuing support.
 
         Args:
             file_path: Path to session_results.json file
             verbose: Print detailed output
+            queue_if_offline: If True, queue the report for later submission when offline
 
         Returns:
             SubmitResult with submission details
@@ -565,7 +891,7 @@ class TestPanelClient:
                 versions = list(data['results'].keys())
                 logger.info(f"  Versions: {len(versions)}")
 
-        # Submit to API
+        # Try to submit to API
         try:
             response = self._make_request('POST', '/api/submit.php', data=data)
 
@@ -575,6 +901,7 @@ class TestPanelClient:
                 result = {'raw_response': response.text}
 
             if response.status_code == 201:
+                self._update_online_status(True)
                 # Handle multi-report response format
                 reports = result.get('reports', [])
                 if reports:
@@ -603,11 +930,147 @@ class TestPanelClient:
                 )
 
         except requests.exceptions.ConnectionError:
-            return SubmitResult(success=False, error=f"Could not connect to API")
+            self._update_online_status(False)
+            if queue_if_offline:
+                submission_id = self.cache.add_pending_submission(file_path, data)
+                return SubmitResult(
+                    success=False,
+                    error=f"Offline - report queued for later submission (ID: {submission_id})"
+                )
+            return SubmitResult(success=False, error="Could not connect to API")
         except requests.exceptions.Timeout:
+            self._update_online_status(False)
+            if queue_if_offline:
+                submission_id = self.cache.add_pending_submission(file_path, data)
+                return SubmitResult(
+                    success=False,
+                    error=f"Timeout - report queued for later submission (ID: {submission_id})"
+                )
             return SubmitResult(success=False, error="Request timed out")
         except requests.exceptions.RequestException as e:
+            self._update_online_status(False)
+            if queue_if_offline:
+                submission_id = self.cache.add_pending_submission(file_path, data)
+                return SubmitResult(
+                    success=False,
+                    error=f"Error - report queued for later submission (ID: {submission_id})"
+                )
             return SubmitResult(success=False, error=str(e))
+
+    def submit_report_data(self, data: Dict[str, Any], queue_if_offline: bool = True) -> SubmitResult:
+        """
+        Submit report data directly (without reading from file).
+
+        Args:
+            data: Report data dict
+            queue_if_offline: If True, queue the report for later submission when offline
+
+        Returns:
+            SubmitResult with submission details
+        """
+        try:
+            response = self._make_request('POST', '/api/submit.php', data=data)
+
+            try:
+                result = response.json()
+            except json.JSONDecodeError:
+                result = {'raw_response': response.text}
+
+            if response.status_code == 201:
+                self._update_online_status(True)
+                reports = result.get('reports', [])
+                if reports:
+                    first_report = reports[0]
+                    return SubmitResult(
+                        success=True,
+                        report_id=first_report.get('report_id'),
+                        client_version=first_report.get('client_version'),
+                        tests_recorded=first_report.get('tests_recorded', 0),
+                        logs_attached=first_report.get('logs_attached', 0),
+                        view_url=first_report.get('view_url')
+                    )
+                return SubmitResult(
+                    success=True,
+                    report_id=result.get('report_id'),
+                    client_version=result.get('client_version'),
+                    tests_recorded=result.get('tests_recorded', 0),
+                    logs_attached=result.get('logs_attached', 0),
+                    view_url=result.get('view_url')
+                )
+            else:
+                return SubmitResult(
+                    success=False,
+                    error=result.get('error', f"HTTP {response.status_code}")
+                )
+
+        except requests.exceptions.RequestException as e:
+            self._update_online_status(False)
+            if queue_if_offline:
+                submission_id = self.cache.add_pending_submission('', data)
+                return SubmitResult(
+                    success=False,
+                    error=f"Offline - report queued (ID: {submission_id})"
+                )
+            return SubmitResult(success=False, error=str(e))
+
+    def _process_pending_submissions(self) -> int:
+        """
+        Process pending submissions when coming back online.
+
+        Returns:
+            Number of successfully submitted reports
+        """
+        pending = self.cache.get_pending_submissions()
+        if not pending:
+            return 0
+
+        logger.info(f"Processing {len(pending)} pending submissions...")
+        success_count = 0
+
+        for submission in pending:
+            try:
+                result = self.submit_report_data(submission.data, queue_if_offline=False)
+                if result.success:
+                    self.cache.remove_pending_submission(submission.id)
+                    success_count += 1
+                    logger.info(f"  Submitted pending report {submission.id} (Report ID: {result.report_id})")
+                else:
+                    # Update attempt count
+                    self.cache.update_pending_submission(
+                        submission.id,
+                        submission.attempts + 1,
+                        result.error
+                    )
+                    logger.warning(f"  Failed to submit {submission.id}: {result.error}")
+            except Exception as e:
+                self.cache.update_pending_submission(
+                    submission.id,
+                    submission.attempts + 1,
+                    str(e)
+                )
+                logger.error(f"  Error submitting {submission.id}: {e}")
+
+        if success_count > 0:
+            logger.info(f"Successfully submitted {success_count} of {len(pending)} pending reports")
+
+        return success_count
+
+    def retry_pending_submissions(self) -> int:
+        """
+        Manually retry pending submissions.
+
+        Returns:
+            Number of successfully submitted reports
+        """
+        return self._process_pending_submissions()
+
+    def get_pending_submissions(self) -> List[PendingSubmission]:
+        """Get list of pending submissions."""
+        return self.cache.get_pending_submissions()
+
+    def clear_pending_submission(self, submission_id: str) -> bool:
+        """Remove a pending submission from the queue."""
+        return self.cache.remove_pending_submission(submission_id)
 
     def check_hashes(self, hashes: Dict[str, str], tester: str, test_type: str,
                      commit_hash: Optional[str] = None) -> HashCheckResult:
@@ -691,13 +1154,15 @@ class TestPanelClient:
             logger.error(f"Error fetching retest queue: {e}")
             return []
 
-    def get_tests(self, enabled_only: bool = True, client_version: Optional[str] = None) -> TestsResult:
+    def get_tests(self, enabled_only: bool = True, client_version: Optional[str] = None,
+                  use_cache: bool = True) -> TestsResult:
         """
-        Get test types and categories from the API.
+        Get test types and categories from the API, with offline cache support.
 
         Args:
             enabled_only: If True, only return enabled tests
             client_version: Optional client version string to get version-specific template tests
+            use_cache: If True, return cached data when offline
 
         Returns:
             TestsResult with tests grouped by category
@@ -712,7 +1177,18 @@ class TestPanelClient:
             response = self._make_request('GET', '/api/tests.php', params=params)
 
             if response.status_code == 200:
-                data = response.json()
+                # Check for empty response body before parsing JSON
+                if not response.text or not response.text.strip():
+                    logger.warning("Empty response body from tests API")
+                    return self._get_cached_tests(client_version) if use_cache else TestsResult(success=False, error="Empty response from server")
+
+                try:
+                    data = response.json()
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Invalid JSON response from tests API: {e}")
+                    logger.debug(f"Response text: {response.text[:500] if response.text else '(empty)'}")
+                    return self._get_cached_tests(client_version) if use_cache else TestsResult(success=False, error=f"Invalid JSON response: {e}")
+
                 if data.get('success'):
                     categories = [TestCategory.from_dict(c) for c in data.get('categories', [])]
                     tests = [TestType.from_dict(t) for t in data.get('tests', [])]
@@ -722,28 +1198,101 @@ class TestPanelClient:
                     for cat_name, test_list in data.get('grouped', {}).items():
                         grouped[cat_name] = [TestType.from_dict(t) for t in test_list]
 
-                    return TestsResult(
+                    # Get skip_tests from the response (synced with admin_versions settings)
+                    skip_tests = data.get('skip_tests', [])
+
+                    result = TestsResult(
                         success=True,
                         categories=categories,
                         tests=tests,
                         grouped=grouped,
-                        template=data.get('template')  # Include template info if present
+                        template=data.get('template'),  # Include template info if present
+                        skip_tests=skip_tests  # Include skip_tests from version settings
                     )
 
-            logger.warning(f"Failed to get tests: HTTP {response.status_code}")
-            return TestsResult(success=False, error=f"HTTP {response.status_code}")
+                    # Update cache with successful response
+                    self._update_online_status(True)
+                    if client_version:
+                        # Cache version-specific tests
+                        test_dicts = [{'test_key': t.test_key, 'name': t.name, 'description': t.description,
+                                      'category_id': t.category_id, 'category_name': t.category_name,
+                                      'sort_order': t.sort_order, 'is_enabled': t.is_enabled} for t in tests]
+                        self.cache.set_version_tests(client_version, test_dicts, skip_tests)
+                    else:
+                        # Cache general test list
+                        test_dicts = [{'test_key': t.test_key, 'name': t.name, 'description': t.description,
+                                      'category_id': t.category_id, 'category_name': t.category_name,
+                                      'sort_order': t.sort_order, 'is_enabled': t.is_enabled} for t in tests]
+                        cat_dicts = [{'id': c.id, 'name': c.name, 'sort_order': c.sort_order} for c in categories]
+                        self.cache.set_tests(test_dicts, cat_dicts)
+                    self.cache.save()
+
+                    return result
+                else:
+                    error_msg = data.get('error', 'Unknown error from server')
+                    logger.warning(f"Tests API returned error: {error_msg}")
+                    return self._get_cached_tests(client_version) if use_cache else TestsResult(success=False, error=error_msg)
+
+            # Handle non-200 status codes with more detail
+            error_msg = f"HTTP {response.status_code}"
+            if response.status_code == 401:
+                error_msg = "Authentication failed - check API key"
+            elif response.status_code == 403:
+                error_msg = "Access denied"
+            elif response.status_code == 404:
+                error_msg = "API endpoint not found - check API URL"
+            elif response.status_code >= 500:
+                error_msg = f"Server error (HTTP {response.status_code})"
+
+            logger.warning(f"Failed to get tests: {error_msg}")
+            return self._get_cached_tests(client_version) if use_cache else TestsResult(success=False, error=error_msg)
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching tests: {e}")
-            return TestsResult(success=False, error=str(e))
+            self._update_online_status(False)
+            return self._get_cached_tests(client_version) if use_cache else TestsResult(success=False, error=str(e))
 
-    def get_versions(self, enabled_only: bool = True, include_notifications: bool = False) -> VersionsResult:
+    def _get_cached_tests(self, client_version: Optional[str] = None) -> TestsResult:
+        """Get tests from cache when offline."""
+        if client_version:
+            # Try version-specific cache
+            cached_tests = self.cache.get_version_tests(client_version)
+            cached_skip = self.cache.get_version_skip_tests(client_version)
+            if cached_tests:
+                tests = [TestType.from_dict(t) for t in cached_tests]
+                logger.info(f"Using cached tests for version {client_version} ({len(tests)} tests)")
+                return TestsResult(
+                    success=True,
+                    tests=tests,
+                    skip_tests=cached_skip,
+                    error="Using cached data (offline)"
+                )
+
+        # Fall back to general test cache
+        cached_tests = self.cache.get_tests()
+        cached_cats = self.cache.get_categories()
+        if cached_tests:
+            tests = [TestType.from_dict(t) for t in cached_tests]
+            categories = [TestCategory.from_dict(c) for c in cached_cats]
+            logger.info(f"Using cached tests ({len(tests)} tests)")
+            return TestsResult(
+                success=True,
+                tests=tests,
+                categories=categories,
+                error="Using cached data (offline)"
+            )
+
+        return TestsResult(success=False, error="No cached data available")
+
+    def get_versions(self, enabled_only: bool = True, include_notifications: bool = False,
+                     use_cache: bool = True) -> VersionsResult:
         """
-        Get client versions from the API.
+        Get client versions from the API, with offline cache support.
 
         Args:
             enabled_only: If True, only return enabled versions
             include_notifications: If True, include notifications for each version
+            use_cache: If True, return cached data when offline
 
         Returns:
             VersionsResult with list of ClientVersion objects
@@ -758,20 +1307,127 @@ class TestPanelClient:
             response = self._make_request('GET', '/api/versions.php', params=params)
 
             if response.status_code == 200:
-                data = response.json()
+                # Check for empty response body before parsing JSON
+                if not response.text or not response.text.strip():
+                    logger.warning("Empty response body from versions API")
+                    return self._get_cached_versions() if use_cache else VersionsResult(success=False, error="Empty response from server")
+
+                try:
+                    data = response.json()
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.error(f"Invalid JSON response from versions API: {e}")
+                    logger.debug(f"Response text: {response.text[:500] if response.text else '(empty)'}")
+                    return self._get_cached_versions() if use_cache else VersionsResult(success=False, error=f"Invalid JSON response: {e}")
+
                 if data.get('success'):
                     versions = [ClientVersion.from_dict(v) for v in data.get('versions', [])]
-                    return VersionsResult(
+
+                    result = VersionsResult(
                         success=True,
                         versions=versions
                     )
 
-            logger.warning(f"Failed to get versions: HTTP {response.status_code}")
-            return VersionsResult(success=False, error=f"HTTP {response.status_code}")
+                    # Update cache with successful response
+                    self._update_online_status(True)
+                    version_dicts = []
+                    for v in versions:
+                        v_dict = {
+                            'id': v.id,
+                            'packages': v.packages,
+                            'steam_date': v.steam_date,
+                            'steam_time': v.steam_time,
+                            'skip_tests': v.skip_tests,
+                            'display_name': v.display_name,
+                            'sort_order': v.sort_order,
+                            'is_enabled': v.is_enabled,
+                            'notifications': [{'id': n.id, 'name': n.name, 'message': n.message,
+                                             'commit_hash': n.commit_hash, 'created_at': n.created_at}
+                                            for n in v.notifications],
+                            'notification_count': v.notification_count
+                        }
+                        version_dicts.append(v_dict)
+                    self.cache.set_versions(version_dicts)
+                    self.cache.save()
+
+                    return result
+                else:
+                    error_msg = data.get('error', 'Unknown error from server')
+                    logger.warning(f"Versions API returned error: {error_msg}")
+                    return self._get_cached_versions() if use_cache else VersionsResult(success=False, error=error_msg)
+
+            # Handle non-200 status codes with more detail
+            error_msg = f"HTTP {response.status_code}"
+            if response.status_code == 401:
+                error_msg = "Authentication failed - check API key"
+            elif response.status_code == 403:
+                error_msg = "Access denied"
+            elif response.status_code == 404:
+                error_msg = "API endpoint not found - check API URL"
+            elif response.status_code >= 500:
+                error_msg = f"Server error (HTTP {response.status_code})"
+
+            logger.warning(f"Failed to get versions: {error_msg}")
+            return self._get_cached_versions() if use_cache else VersionsResult(success=False, error=error_msg)
 
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching versions: {e}")
-            return VersionsResult(success=False, error=str(e))
+            self._update_online_status(False)
+            return self._get_cached_versions() if use_cache else VersionsResult(success=False, error=str(e))
+
+    def _get_cached_versions(self) -> VersionsResult:
+        """Get versions from cache when offline."""
+        cached_versions = self.cache.get_versions()
+        if cached_versions:
+            versions = [ClientVersion.from_dict(v) for v in cached_versions]
+            logger.info(f"Using cached versions ({len(versions)} versions)")
+            return VersionsResult(
+                success=True,
+                versions=versions,
+                error="Using cached data (offline)"
+            )
+        return VersionsResult(success=False, error="No cached data available")
+
+    def _update_online_status(self, is_online: bool):
+        """Update online status and notify callbacks."""
+        was_online = self._is_online
+        self._is_online = is_online
+        self.cache.set_online_status(is_online)
+
+        # Notify callbacks if status changed
+        if was_online != is_online:
+            for callback in self._online_callbacks:
+                try:
+                    callback(is_online)
+                except Exception as e:
+                    logger.error(f"Error in online status callback: {e}")
+
+            if is_online and not was_online:
+                logger.info("Connection restored - now online")
+                # Try to submit pending reports
+                self._process_pending_submissions()
+            elif not is_online and was_online:
+                logger.warning("Connection lost - now offline")
+
+    def add_online_callback(self, callback: Callable[[bool], None]):
+        """Add callback to be notified when online status changes."""
+        self._online_callbacks.append(callback)
+
+    def remove_online_callback(self, callback: Callable[[bool], None]):
+        """Remove online status callback."""
+        if callback in self._online_callbacks:
+            self._online_callbacks.remove(callback)
+
+    def is_online(self) -> bool:
+        """Check if currently online (based on last API call)."""
+        return self._is_online
+
+    def has_cached_data(self) -> bool:
+        """Check if there's cached data available for offline use."""
+        return self.cache.has_cached_data()
+
+    def get_pending_submissions_count(self) -> int:
+        """Get count of reports waiting to be submitted."""
+        return self.cache.get_pending_count()
 
     def get_version_notifications(self, version_id: str, commit_hash: Optional[str] = None) -> List[VersionNotification]:
         """

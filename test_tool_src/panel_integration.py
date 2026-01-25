@@ -36,7 +36,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 # Try to import the API client from the test tool directory
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from api_client import TestPanelClient, Config, RetestItem, SubmitResult, ReportLog, UserInfo
+    from api_client import TestPanelClient, Config, RetestItem, SubmitResult, ReportLog, UserInfo, VersionsResult
 except ImportError:
     # Fallback: define minimal classes if import fails
     TestPanelClient = None
@@ -476,24 +476,20 @@ class PanelIntegration(QObject):
         return self._last_retests
 
     def submit_session(self, session_file: str = 'session_results.json',
-                      async_submit: bool = True) -> Optional[SubmitResult]:
+                      async_submit: bool = True, queue_if_offline: bool = True) -> Optional[SubmitResult]:
         """
         Submit a session results file to the API.
+
+        When offline, the submission will be queued for later if queue_if_offline is True.
 
         Args:
             session_file: Path to session_results.json
             async_submit: If True, submit in background thread
+            queue_if_offline: If True, queue submission when offline for later retry
 
         Returns:
             SubmitResult if sync, None if async (result via signal)
         """
-        if self._offline_mode:
-            error = "Offline mode - restart to submit"
-            if async_submit:
-                self.submission_complete.emit(False, error, None)
-                return None
-            return SubmitResult(success=False, error=error)
-
         if not self.is_configured:
             result = SubmitResult(success=False, error="Not configured")
             if async_submit:
@@ -517,32 +513,38 @@ class PanelIntegration(QObject):
             # Submit in background thread
             thread = threading.Thread(
                 target=self._async_submit,
-                args=(session_file,),
+                args=(session_file, queue_if_offline),
                 daemon=True
             )
             thread.start()
             return None
         else:
             # Synchronous submit
-            return self._do_submit(session_file)
+            return self._do_submit(session_file, queue_if_offline)
 
-    def _do_submit(self, session_file: str) -> SubmitResult:
+    def _do_submit(self, session_file: str, queue_if_offline: bool = True) -> SubmitResult:
         """Perform the actual submission."""
         try:
-            result = self._client.submit_report(session_file, verbose=True)
+            result = self._client.submit_report(session_file, verbose=True, queue_if_offline=queue_if_offline)
             return result
         except Exception as e:
             return SubmitResult(success=False, error=str(e))
 
-    def _async_submit(self, session_file: str):
+    def _async_submit(self, session_file: str, queue_if_offline: bool = True):
         """Background thread submission handler."""
-        result = self._do_submit(session_file)
+        result = self._do_submit(session_file, queue_if_offline)
 
         if result.success:
             message = f"Report #{result.report_id} submitted successfully"
             self.submission_complete.emit(True, message, result.report_id)
         else:
-            self.submission_complete.emit(False, result.error or "Unknown error", None)
+            # Check if it was queued for later
+            error_msg = result.error or "Unknown error"
+            if "queued" in error_msg.lower():
+                # Partial success - queued for later
+                self.submission_complete.emit(True, f"📤 {error_msg}", None)
+            else:
+                self.submission_complete.emit(False, error_msg, None)
 
     def get_retests_for_version(self, client_version: str) -> List[RetestNotification]:
         """
@@ -585,6 +587,8 @@ class PanelIntegration(QObject):
         """
         Get test types and categories from the API.
 
+        When offline, returns cached tests if available.
+
         Args:
             enabled_only: If True, only return enabled tests
             client_version: Optional client version string to get version-specific template tests
@@ -592,19 +596,100 @@ class PanelIntegration(QObject):
         Returns:
             TestsResult object with tests grouped by category, or None if not configured
         """
-        if self._offline_mode:
-            logger.warning("Cannot get tests: offline mode is active")
-            return None
-
         if not self.is_configured:
             logger.warning("Cannot get tests: not configured")
             return None
 
         try:
-            return self._client.get_tests(enabled_only, client_version)
+            # The client handles offline mode internally and returns cached data
+            return self._client.get_tests(enabled_only, client_version, use_cache=True)
         except Exception as e:
             logger.error(f"Error getting tests from API: {e}")
             return None
+
+    def get_versions(self, enabled_only: bool = True, include_notifications: bool = False):
+        """
+        Get client versions from the API.
+
+        When offline, returns cached versions if available.
+
+        Args:
+            enabled_only: If True, only return enabled versions
+            include_notifications: If True, include notifications for each version
+
+        Returns:
+            VersionsResult object with list of ClientVersion objects, or None if not configured
+        """
+        if not self.is_configured:
+            logger.warning("Cannot get versions: not configured")
+            return None
+
+        try:
+            # The client handles offline mode internally and returns cached data
+            return self._client.get_versions(enabled_only, include_notifications, use_cache=True)
+        except Exception as e:
+            logger.error(f"Error getting versions from API: {e}")
+            return None
+
+    def has_cached_data(self) -> bool:
+        """Check if cached data is available for offline use."""
+        if not self.is_configured:
+            return False
+        try:
+            return self._client.has_cached_data()
+        except Exception:
+            return False
+
+    def is_api_online(self) -> bool:
+        """Check if the API is currently online (based on last connection status)."""
+        if not self.is_configured:
+            return False
+        try:
+            return self._client.is_online()
+        except Exception:
+            return False
+
+    def get_pending_submissions_count(self) -> int:
+        """Get the number of pending submissions waiting to be sent."""
+        if not self.is_configured:
+            return 0
+        try:
+            return self._client.get_pending_submissions_count()
+        except Exception:
+            return 0
+
+    def get_pending_submissions(self) -> list:
+        """Get list of pending submissions waiting to be sent."""
+        if not self.is_configured:
+            return []
+        try:
+            return self._client.get_pending_submissions()
+        except Exception:
+            return []
+
+    def retry_pending_submissions(self) -> dict:
+        """
+        Retry sending all pending submissions.
+
+        Returns:
+            Dict with 'succeeded' and 'failed' counts
+        """
+        if not self.is_configured:
+            return {'succeeded': 0, 'failed': 0}
+        try:
+            return self._client.retry_pending_submissions()
+        except Exception as e:
+            logger.error(f"Error retrying pending submissions: {e}")
+            return {'succeeded': 0, 'failed': 0}
+
+    def clear_pending_submission(self, submission_id: str) -> bool:
+        """Remove a pending submission from the queue."""
+        if not self.is_configured:
+            return False
+        try:
+            return self._client.clear_pending_submission(submission_id)
+        except Exception:
+            return False
 
     def get_user_info(self) -> Optional[str]:
         """

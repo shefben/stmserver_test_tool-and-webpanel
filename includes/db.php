@@ -2265,6 +2265,72 @@ class Database {
         return $templates;
     }
 
+    /**
+     * Get all test_keys that have been tested (submitted in reports) for specific client versions
+     * Returns array of test_keys with their submission info
+     */
+    public function getTestedTestKeysForVersions($versionStrings = []) {
+        if (empty($versionStrings)) {
+            return [];
+        }
+
+        $placeholders = implode(',', array_fill(0, count($versionStrings), '?'));
+
+        // Get all distinct test_keys that have been submitted for these versions
+        // with status other than N/A (meaning they were actually tested)
+        $stmt = $this->pdo->prepare("
+            SELECT DISTINCT tr.test_key, r.client_version, tr.status,
+                   COUNT(DISTINCT r.id) as report_count,
+                   MAX(r.submitted_at) as last_submitted
+            FROM test_results tr
+            INNER JOIN reports r ON tr.report_id = r.id
+            WHERE r.client_version IN ($placeholders)
+              AND tr.status != 'N/A'
+              AND tr.status != ''
+            GROUP BY tr.test_key, r.client_version, tr.status
+            ORDER BY tr.test_key
+        ");
+        $stmt->execute($versionStrings);
+        $results = $stmt->fetchAll();
+
+        // Group by test_key with aggregated version info
+        $testedKeys = [];
+        foreach ($results as $row) {
+            $key = $row['test_key'];
+            if (!isset($testedKeys[$key])) {
+                $testedKeys[$key] = [
+                    'test_key' => $key,
+                    'versions' => [],
+                    'total_reports' => 0
+                ];
+            }
+            $testedKeys[$key]['versions'][] = $row['client_version'];
+            $testedKeys[$key]['total_reports'] += $row['report_count'];
+        }
+
+        // Remove duplicate versions
+        foreach ($testedKeys as &$item) {
+            $item['versions'] = array_unique($item['versions']);
+        }
+
+        return $testedKeys;
+    }
+
+    /**
+     * Get test_keys that have not yet been tested for specific client versions
+     * Uses the template's test_keys and subtracts already tested ones
+     */
+    public function getUntestedTestKeysForVersions($templateTestKeys, $versionStrings = []) {
+        if (empty($versionStrings)) {
+            return $templateTestKeys;
+        }
+
+        $testedKeys = $this->getTestedTestKeysForVersions($versionStrings);
+        $testedKeyNames = array_keys($testedKeys);
+
+        return array_values(array_diff($templateTestKeys, $testedKeyNames));
+    }
+
     // =====================
     // REPORT TAGS
     // =====================

@@ -104,10 +104,42 @@ $clientVersions = $db->getClientVersions(true); // Get enabled versions only
 // Editing a template?
 $editTemplate = null;
 $editTemplateVersionIds = [];
+$testedTestKeys = [];
 if ($action === 'edit' && $templateId) {
     $editTemplate = $db->getTestTemplate($templateId);
     if ($editTemplate) {
         $editTemplateVersionIds = $db->getTemplateVersionIds($templateId);
+
+        // Get tested test keys for assigned versions
+        if (!empty($editTemplateVersionIds)) {
+            // Get version strings for the assigned version IDs
+            $assignedVersionStrings = [];
+            foreach ($clientVersions as $v) {
+                if (in_array($v['id'], $editTemplateVersionIds)) {
+                    $assignedVersionStrings[] = $v['version_id'];
+                }
+            }
+            if (!empty($assignedVersionStrings)) {
+                $testedTestKeys = $db->getTestedTestKeysForVersions($assignedVersionStrings);
+            }
+        }
+    }
+}
+
+// Also prepare tested keys for new templates if versions are pre-selected (via URL param)
+$preSelectedVersionIds = [];
+if ($action === 'new' && isset($_GET['versions'])) {
+    $preSelectedVersionIds = array_map('intval', explode(',', $_GET['versions']));
+    if (!empty($preSelectedVersionIds)) {
+        $assignedVersionStrings = [];
+        foreach ($clientVersions as $v) {
+            if (in_array($v['id'], $preSelectedVersionIds)) {
+                $assignedVersionStrings[] = $v['version_id'];
+            }
+        }
+        if (!empty($assignedVersionStrings)) {
+            $testedTestKeys = $db->getTestedTestKeysForVersions($assignedVersionStrings);
+        }
     }
 }
 ?>
@@ -169,9 +201,19 @@ if ($action === 'edit' && $templateId) {
 
             <div class="form-group">
                 <label>Select Tests</label>
+                <?php if (!empty($testedTestKeys)): ?>
+                <div class="tested-legend">
+                    <span class="legend-item"><span class="indicator tested"></span> Already tested for assigned versions (<?= count($testedTestKeys) ?> tests)</span>
+                    <span class="legend-item"><span class="indicator untested"></span> Not yet tested</span>
+                </div>
+                <?php endif; ?>
                 <div class="test-selection-toolbar">
                     <button type="button" class="btn btn-sm btn-secondary" onclick="selectAllTests()">Select All</button>
                     <button type="button" class="btn btn-sm btn-secondary" onclick="selectNoneTests()">Select None</button>
+                    <?php if (!empty($testedTestKeys)): ?>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="selectUntestedOnly()">Select Untested Only</button>
+                    <button type="button" class="btn btn-sm btn-secondary" onclick="deselectTested()">Deselect Tested</button>
+                    <?php endif; ?>
                     <span class="selected-count" id="selected-count">0 selected</span>
                 </div>
 
@@ -191,14 +233,23 @@ if ($action === 'edit' && $templateId) {
                                     $checked = $editTemplate
                                         ? in_array($testKey, $editTemplate['test_keys'])
                                         : ($action === 'new');
+                                    $isTested = isset($testedTestKeys[$testKey]);
+                                    $testedInfo = $isTested ? $testedTestKeys[$testKey] : null;
+                                    $testedTitle = $isTested
+                                        ? "Already tested in " . $testedInfo['total_reports'] . " report(s) for: " . implode(', ', $testedInfo['versions'])
+                                        : $testInfo['expected'];
                                     ?>
-                                    <label class="test-checkbox-label" title="<?= e($testInfo['expected']) ?>">
+                                    <label class="test-checkbox-label <?= $isTested ? 'is-tested' : 'is-untested' ?>" title="<?= e($testedTitle) ?>">
                                         <input type="checkbox" name="test_keys[]" value="<?= e($testKey) ?>"
                                                data-category="<?= e($categoryName) ?>"
+                                               data-tested="<?= $isTested ? '1' : '0' ?>"
                                                <?= $checked ? 'checked' : '' ?>
                                                onchange="updateSelectedCount()">
                                         <span class="test-key"><?= e($testKey) ?></span>
                                         <span class="test-name"><?= e($testInfo['name']) ?></span>
+                                        <?php if ($isTested): ?>
+                                        <span class="tested-badge" title="<?= e($testedTitle) ?>">✓</span>
+                                        <?php endif; ?>
                                     </label>
                                 <?php endforeach; ?>
                             </div>
@@ -439,6 +490,54 @@ if ($action === 'edit' && $templateId) {
     color: var(--text-muted);
     font-weight: normal;
 }
+
+/* Tested/Untested indicators */
+.tested-legend {
+    display: flex;
+    gap: 20px;
+    padding: 10px 15px;
+    background: var(--bg-dark);
+    border-radius: 6px;
+    margin-bottom: 10px;
+    font-size: 13px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.legend-item .indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+}
+
+.legend-item .indicator.tested {
+    background: var(--status-working);
+}
+
+.legend-item .indicator.untested {
+    background: var(--bg-accent);
+    border: 1px solid var(--border);
+}
+
+.test-checkbox-label.is-tested {
+    background: rgba(39, 174, 96, 0.1);
+    border-left: 3px solid var(--status-working);
+}
+
+.test-checkbox-label.is-tested:hover {
+    background: rgba(39, 174, 96, 0.2);
+}
+
+.tested-badge {
+    color: var(--status-working);
+    font-size: 11px;
+    margin-left: auto;
+    font-weight: bold;
+}
 </style>
 
 <script>
@@ -480,8 +579,109 @@ function selectNoneTests() {
     updateSelectedCount();
 }
 
-// Initialize count on page load
-document.addEventListener('DOMContentLoaded', updateSelectedCount);
+function selectUntestedOnly() {
+    document.querySelectorAll('input[name="test_keys[]"]').forEach(function(cb) {
+        // Select only if NOT tested (data-tested="0")
+        cb.checked = cb.getAttribute('data-tested') !== '1';
+    });
+    updateSelectedCount();
+}
+
+function deselectTested() {
+    document.querySelectorAll('input[name="test_keys[]"]').forEach(function(cb) {
+        // Deselect if tested (data-tested="1")
+        if (cb.getAttribute('data-tested') === '1') {
+            cb.checked = false;
+        }
+    });
+    updateSelectedCount();
+}
+
+// Update tested status when versions change
+document.addEventListener('DOMContentLoaded', function() {
+    updateSelectedCount();
+
+    // Listen for version selection changes to reload tested tests via AJAX
+    var versionSelect = document.getElementById('version_ids');
+    if (versionSelect) {
+        versionSelect.addEventListener('change', function() {
+            updateTestedTestsForVersions();
+        });
+    }
+});
+
+function updateTestedTestsForVersions() {
+    var versionSelect = document.getElementById('version_ids');
+    if (!versionSelect) return;
+
+    var selectedVersionIds = Array.from(versionSelect.selectedOptions).map(function(opt) {
+        return opt.value;
+    });
+
+    if (selectedVersionIds.length === 0) {
+        // No versions selected - remove all tested indicators
+        document.querySelectorAll('.test-checkbox-label').forEach(function(label) {
+            label.classList.remove('is-tested');
+            label.classList.add('is-untested');
+            var badge = label.querySelector('.tested-badge');
+            if (badge) badge.remove();
+            var input = label.querySelector('input');
+            if (input) input.setAttribute('data-tested', '0');
+        });
+        // Hide legend
+        var legend = document.querySelector('.tested-legend');
+        if (legend) legend.style.display = 'none';
+        return;
+    }
+
+    // Fetch tested tests for selected versions
+    fetch('api/tested_tests.php?version_ids=' + selectedVersionIds.join(','))
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
+            if (!data.success) return;
+
+            var testedKeys = data.tested_keys || {};
+
+            // Update all test checkboxes
+            document.querySelectorAll('.test-checkbox-label').forEach(function(label) {
+                var input = label.querySelector('input[name="test_keys[]"]');
+                if (!input) return;
+
+                var testKey = input.value;
+                var isTested = testedKeys.hasOwnProperty(testKey);
+
+                label.classList.toggle('is-tested', isTested);
+                label.classList.toggle('is-untested', !isTested);
+                input.setAttribute('data-tested', isTested ? '1' : '0');
+
+                // Add/remove tested badge
+                var existingBadge = label.querySelector('.tested-badge');
+                if (isTested && !existingBadge) {
+                    var badge = document.createElement('span');
+                    badge.className = 'tested-badge';
+                    badge.textContent = '✓';
+                    badge.title = 'Already tested in ' + testedKeys[testKey].total_reports + ' report(s)';
+                    label.appendChild(badge);
+                } else if (!isTested && existingBadge) {
+                    existingBadge.remove();
+                }
+            });
+
+            // Show/hide legend
+            var legend = document.querySelector('.tested-legend');
+            if (legend) {
+                var testedCount = Object.keys(testedKeys).length;
+                legend.style.display = testedCount > 0 ? 'flex' : 'none';
+                var countSpan = legend.querySelector('.legend-item:first-child');
+                if (countSpan && testedCount > 0) {
+                    countSpan.innerHTML = '<span class="indicator tested"></span> Already tested for assigned versions (' + testedCount + ' tests)';
+                }
+            }
+        })
+        .catch(function(err) {
+            console.error('Failed to fetch tested tests:', err);
+        });
+}
 </script>
 
 <?php require_once __DIR__ . '/../includes/footer.php'; ?>

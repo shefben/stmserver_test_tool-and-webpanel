@@ -97,6 +97,26 @@ function cleanNotes($notes) {
         }
     }
 
+    // Convert HTML <pre><code> blocks to markdown code blocks BEFORE stripping tags
+    // This preserves code blocks that were created in the Qt editor
+    $extractedCodeBlocks = [];
+    $notes = preg_replace_callback(
+        '/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/i',
+        function($match) use (&$extractedCodeBlocks) {
+            // Extract code content from <pre><code> block
+            $codeHtml = $match[1];
+            // Strip inner HTML tags (like syntax highlighting spans)
+            $codeText = strip_tags($codeHtml);
+            // Decode HTML entities
+            $codeText = html_entity_decode($codeText, ENT_QUOTES, 'UTF-8');
+            // Store placeholder and actual code
+            $placeholder = "__CODE_BLOCK_" . count($extractedCodeBlocks) . "__";
+            $extractedCodeBlocks[] = $codeText;
+            return $placeholder;
+        },
+        $notes
+    );
+
     // Handle Qt rich text HTML - convert to plain text
     $text = strip_tags($notes);
     $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
@@ -104,6 +124,17 @@ function cleanNotes($notes) {
     $text = str_replace('p, li { white-space: pre-wrap; }', '', $text);
     // Clean up "image" link text that Qt leaves behind
     $text = preg_replace('/\bimage\b\s*/i', '', $text);
+    $text = trim($text);
+
+    // Replace code block placeholders with markdown code blocks
+    foreach ($extractedCodeBlocks as $i => $codeText) {
+        $placeholder = "__CODE_BLOCK_{$i}__";
+        $markdownBlock = "\n```\n{$codeText}\n```\n";
+        $text = str_replace($placeholder, $markdownBlock, $text);
+    }
+
+    // Clean up multiple newlines that may result from replacements
+    $text = preg_replace('/\n{3,}/', "\n\n", $text);
     $text = trim($text);
 
     // Append extracted images in a format the renderer understands

@@ -30,6 +30,7 @@ if ($method === 'GET') {
     // Get version-specific template if client_version provided
     $templateTestKeys = null;
     $templateInfo = null;
+    $versionSkipTests = [];
     if ($clientVersion) {
         $template = $db->getTemplateForVersionString($clientVersion);
         if ($template && !empty($template['test_keys'])) {
@@ -39,6 +40,12 @@ if ($method === 'GET') {
                 'name' => $template['name'],
                 'is_default' => (bool)$template['is_default']
             ];
+        }
+
+        // Get skip_tests from the client version (synced with admin_versions settings)
+        $versionData = $db->getClientVersionByVersionId($clientVersion);
+        if ($versionData && !empty($versionData['skip_tests'])) {
+            $versionSkipTests = $versionData['skip_tests'];
         }
     }
 
@@ -155,6 +162,12 @@ if ($method === 'GET') {
     // Include template info if a version-specific template was applied
     if ($templateInfo !== null) {
         $response['template'] = $templateInfo;
+    }
+
+    // Include skip_tests from client version settings (synced with admin_versions page)
+    // This allows the client to know which tests to skip without needing a separate API call
+    if (!empty($versionSkipTests)) {
+        $response['skip_tests'] = $versionSkipTests;
     }
 
     echo json_encode($response);

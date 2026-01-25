@@ -760,17 +760,23 @@ const RichNotesRenderer = {
 
     /**
      * Render fenced code blocks
-     * Supports: ```language\ncode\n``` or just ```\ncode\n```
+     * Supports: ```language\ncode\n```, ```\ncode\n```, or even ```code```
+     * Handles both \n and \r\n line endings
      */
     renderCodeBlocks: function(html) {
-        // Match ```language\ncode\n``` pattern
-        const codeBlockRegex = /```(\w*)\n([\s\S]*?)```/g;
+        // Match ```language\ncode``` or ```code``` patterns
+        // Language is optional, newline after language is optional, handles \r\n
+        const codeBlockRegex = /```(\w*)[\r\n]*([\s\S]*?)```/g;
 
         return html.replace(codeBlockRegex, function(match, lang, code) {
+            // Skip if the content is empty or just whitespace
+            if (!code.trim()) {
+                return match;
+            }
             const langClass = lang ? ' data-language="' + lang + '"' : '';
             const langLabel = lang ? '<span class="code-lang">' + lang + '</span>' : '';
-            // Trim trailing newline from code
-            code = code.replace(/\n$/, '');
+            // Trim leading/trailing whitespace from code
+            code = code.replace(/^[\r\n]+/, '').replace(/[\r\n]+$/, '');
             return '<div class="code-block-wrapper">' + langLabel +
                    '<pre class="code-block"' + langClass + '><code>' + code + '</code></pre>' +
                    '<button type="button" class="code-copy-btn" onclick="RichNotesRenderer.copyCode(this)" title="Copy code">📋</button></div>';

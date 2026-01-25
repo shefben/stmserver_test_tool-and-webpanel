@@ -405,10 +405,13 @@ if (isGitHubConfigured()) {
                                         </select>
                                     </td>
                                     <td>
-                                        <input type="text" name="notes[<?= e($testKey) ?>]"
-                                               value="<?= e($currentNotes) ?>"
-                                               placeholder="Optional notes"
-                                               class="notes-input">
+                                        <div class="notes-input-wrapper">
+                                            <textarea name="notes[<?= e($testKey) ?>]"
+                                                      placeholder="Notes (drag &amp; drop images)"
+                                                      class="notes-input notes-textarea"
+                                                      rows="1"><?= e($currentNotes) ?></textarea>
+                                            <div class="notes-image-preview" style="display: none;"></div>
+                                        </div>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -517,10 +520,12 @@ if (isGitHubConfigured()) {
     width: 100%;
     padding: 6px 10px;
     border-radius: 4px;
-    border: 1px solid var(--border);
+    border: 2px solid #899281;
+    outline: 1px solid #292d23;
     background: var(--bg-dark);
     color: var(--text);
     font-size: 13px;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .status-select.working { border-color: var(--status-working); }
@@ -528,6 +533,11 @@ if (isGitHubConfigured()) {
 .status-select.semi-working { border-color: var(--status-semi); }
 .status-select.not-working { border-color: var(--status-broken); }
 .status-select.n\/a { border-color: var(--status-na); }
+
+/* Notes input wrapper */
+.notes-input-wrapper {
+    position: relative;
+}
 
 /* Notes input */
 .notes-input {
@@ -538,6 +548,83 @@ if (isGitHubConfigured()) {
     background: var(--bg-dark);
     color: var(--text);
     font-size: 13px;
+}
+
+/* Notes textarea specific */
+.notes-textarea {
+    min-height: 32px;
+    max-height: 150px;
+    resize: vertical;
+    font-family: inherit;
+    line-height: 1.4;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+/* Drag over state */
+.notes-textarea.dragover {
+    border-color: var(--primary) !important;
+    box-shadow: 0 0 0 2px rgba(126, 166, 75, 0.3);
+    background: rgba(126, 166, 75, 0.1);
+}
+
+/* Image preview container */
+.notes-image-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+    padding: 6px;
+    background: var(--bg-dark);
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+}
+
+.notes-image-preview:empty {
+    display: none !important;
+}
+
+/* Image thumbnail in notes */
+.notes-image-thumb {
+    position: relative;
+    display: inline-block;
+}
+
+.notes-image-thumb img {
+    max-width: 60px;
+    max-height: 60px;
+    border: 2px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: border-color 0.2s, transform 0.2s;
+}
+
+.notes-image-thumb img:hover {
+    border-color: var(--primary);
+    transform: scale(1.05);
+}
+
+.notes-image-thumb .remove-image {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 18px;
+    height: 18px;
+    background: #c45050;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    font-size: 12px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.notes-image-thumb:hover .remove-image {
+    opacity: 1;
 }
 
 /* Alert styles */
@@ -984,6 +1071,213 @@ function showPopup(title, content) {
     });
 
     document.body.appendChild(overlay);
+}
+
+// ==================== Image Drag & Drop for Notes ====================
+
+// Initialize image drag/drop on all notes textareas
+document.addEventListener('DOMContentLoaded', function() {
+    initNotesImageDragDrop();
+});
+
+function initNotesImageDragDrop() {
+    document.querySelectorAll('.notes-textarea').forEach(function(textarea) {
+        // Prevent default drag behaviors
+        textarea.addEventListener('dragenter', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+
+        textarea.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            // Check if dragging images
+            if (e.dataTransfer.types.includes('Files')) {
+                this.classList.add('dragover');
+            }
+        });
+
+        textarea.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.classList.remove('dragover');
+        });
+
+        textarea.addEventListener('drop', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.classList.remove('dragover');
+
+            var files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleNotesImageDrop(this, files);
+            }
+        });
+
+        // Also handle paste for images
+        textarea.addEventListener('paste', function(e) {
+            var items = e.clipboardData.items;
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    e.preventDefault();
+                    var file = items[i].getAsFile();
+                    handleNotesImageDrop(this, [file]);
+                    break;
+                }
+            }
+        });
+    });
+}
+
+function handleNotesImageDrop(textarea, files) {
+    var wrapper = textarea.closest('.notes-input-wrapper');
+    var previewContainer = wrapper.querySelector('.notes-image-preview');
+
+    for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+
+        // Only process image files
+        if (!file.type.startsWith('image/')) {
+            continue;
+        }
+
+        // Check file size (max 2MB per image)
+        if (file.size > 2 * 1024 * 1024) {
+            alert('Image "' + file.name + '" is too large. Maximum size is 2MB.');
+            continue;
+        }
+
+        // Read file and convert to base64
+        (function(f, ta, pc) {
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                var dataUri = e.target.result;
+
+                // Insert image marker at cursor position or end
+                var marker = '{{IMAGE:' + dataUri + '}}';
+                insertTextAtCursor(ta, marker);
+
+                // Auto-expand textarea if needed
+                autoExpandTextarea(ta);
+
+                // Show preview
+                showImagePreview(pc, dataUri, ta, marker);
+            };
+            reader.readAsDataURL(f);
+        })(file, textarea, previewContainer);
+    }
+}
+
+function insertTextAtCursor(textarea, text) {
+    var startPos = textarea.selectionStart;
+    var endPos = textarea.selectionEnd;
+    var before = textarea.value.substring(0, startPos);
+    var after = textarea.value.substring(endPos);
+
+    // Add newline before if not at start and not already preceded by newline
+    if (before.length > 0 && !before.endsWith('\n')) {
+        text = '\n' + text;
+    }
+
+    textarea.value = before + text + after;
+
+    // Move cursor after inserted text
+    var newPos = before.length + text.length;
+    textarea.selectionStart = newPos;
+    textarea.selectionEnd = newPos;
+    textarea.focus();
+}
+
+function autoExpandTextarea(textarea) {
+    // Temporarily reset height to auto to get scrollHeight
+    textarea.style.height = 'auto';
+    var newHeight = Math.min(textarea.scrollHeight, 150); // max 150px
+    textarea.style.height = newHeight + 'px';
+}
+
+function showImagePreview(container, dataUri, textarea, marker) {
+    container.style.display = 'flex';
+
+    var thumb = document.createElement('div');
+    thumb.className = 'notes-image-thumb';
+
+    var img = document.createElement('img');
+    img.src = dataUri;
+    img.alt = 'Embedded image';
+    img.title = 'Click to view full size';
+    img.onclick = function() {
+        openImagePreviewModal(dataUri);
+    };
+
+    var removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'remove-image';
+    removeBtn.innerHTML = '&times;';
+    removeBtn.title = 'Remove image';
+    removeBtn.onclick = function(e) {
+        e.stopPropagation();
+        // Remove the marker from textarea
+        textarea.value = textarea.value.replace(marker, '');
+        // Remove the thumbnail
+        thumb.remove();
+        // Hide preview container if empty
+        if (container.children.length === 0) {
+            container.style.display = 'none';
+        }
+        // Re-adjust textarea height
+        autoExpandTextarea(textarea);
+    };
+
+    thumb.appendChild(img);
+    thumb.appendChild(removeBtn);
+    container.appendChild(thumb);
+}
+
+function openImagePreviewModal(dataUri) {
+    // Remove existing modal if any
+    var existingModal = document.getElementById('image-preview-modal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+
+    var modal = document.createElement('div');
+    modal.id = 'image-preview-modal';
+    modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 30000; display: flex; align-items: center; justify-content: center; cursor: pointer;';
+
+    var content = document.createElement('div');
+    content.style.cssText = 'position: relative; max-width: 90%; max-height: 90%; cursor: default;';
+
+    var img = document.createElement('img');
+    img.src = dataUri;
+    img.style.cssText = 'max-width: 100%; max-height: 85vh; border: 3px solid var(--border); border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,0.5);';
+
+    var closeBtn = document.createElement('button');
+    closeBtn.innerHTML = '&times;';
+    closeBtn.style.cssText = 'position: absolute; top: -15px; right: -15px; width: 36px; height: 36px; background: var(--bg-card); color: var(--text); border: 2px solid var(--border); border-radius: 50%; font-size: 24px; cursor: pointer; display: flex; align-items: center; justify-content: center;';
+    closeBtn.onclick = function() {
+        modal.remove();
+    };
+
+    content.appendChild(img);
+    content.appendChild(closeBtn);
+    modal.appendChild(content);
+
+    modal.addEventListener('click', function(e) {
+        if (e.target === modal) {
+            modal.remove();
+        }
+    });
+
+    // Close on Escape
+    var closeOnEscape = function(e) {
+        if (e.key === 'Escape') {
+            modal.remove();
+            document.removeEventListener('keydown', closeOnEscape);
+        }
+    };
+    document.addEventListener('keydown', closeOnEscape);
+
+    document.body.appendChild(modal);
 }
 </script>
 
