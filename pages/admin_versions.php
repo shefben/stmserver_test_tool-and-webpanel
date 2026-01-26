@@ -15,6 +15,11 @@ if (!isAdmin()) {
 
 $db = Database::getInstance();
 $db->ensureClientVersionsTable();
+$db->ensureTemplatesTable();
+$db->ensureTemplateVersionsTable();
+
+// Get all available templates for dropdown
+$allTemplates = $db->getTestTemplates();
 
 // Handle form submissions
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -25,14 +30,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $displayName = trim($_POST['display_name'] ?? '');
         $steamDate = trim($_POST['steam_date'] ?? '');
         $steamTime = trim($_POST['steam_time'] ?? '');
-        $packagesRaw = trim($_POST['packages'] ?? '');
-        $skipTestsRaw = trim($_POST['skip_tests'] ?? '');
+        $steamPkgVersion = preg_replace('/[^0-9]/', '', $_POST['steam_pkg_version'] ?? '');
+        $steamuiPkgVersion = preg_replace('/[^0-9]/', '', $_POST['steamui_pkg_version'] ?? '');
+        $templateId = intval($_POST['template_id'] ?? 0);
         $sortOrder = intval($_POST['sort_order'] ?? 0);
         $isEnabled = isset($_POST['is_enabled']) ? 1 : 0;
 
-        // Parse packages and skip_tests from comma-separated strings
-        $packages = array_filter(array_map('trim', explode(',', $packagesRaw)));
-        $skipTests = array_filter(array_map('trim', explode(',', $skipTestsRaw)));
+        // Build packages array from the two version fields
+        $packages = [];
+        if ($steamPkgVersion) {
+            $packages[] = 'Steam_' . $steamPkgVersion;
+        }
+        if ($steamuiPkgVersion) {
+            $packages[] = 'SteamUI_' . $steamuiPkgVersion;
+        }
 
         if (!$versionId) {
             setFlash('error', 'Version ID is required.');
@@ -45,12 +56,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $steamDate ?: null,
                 $steamTime ?: null,
                 $packages,
-                $skipTests,
+                [], // Empty skip_tests - replaced by templates
                 $sortOrder,
                 $isEnabled,
                 $_SESSION['user_id']
             );
             if ($id) {
+                // Assign template to this version (one-to-one relationship)
+                $db->setVersionTemplate($id, $templateId ?: null);
                 setFlash('success', "Client version created successfully.");
             } else {
                 setFlash('error', 'Failed to create client version.');
@@ -62,13 +75,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $displayName = trim($_POST['display_name'] ?? '');
         $steamDate = trim($_POST['steam_date'] ?? '');
         $steamTime = trim($_POST['steam_time'] ?? '');
-        $packagesRaw = trim($_POST['packages'] ?? '');
-        $skipTestsRaw = trim($_POST['skip_tests'] ?? '');
+        $steamPkgVersion = preg_replace('/[^0-9]/', '', $_POST['steam_pkg_version'] ?? '');
+        $steamuiPkgVersion = preg_replace('/[^0-9]/', '', $_POST['steamui_pkg_version'] ?? '');
+        $templateId = intval($_POST['template_id'] ?? 0);
         $sortOrder = intval($_POST['sort_order'] ?? 0);
         $isEnabled = isset($_POST['is_enabled']) ? 1 : 0;
 
-        $packages = array_filter(array_map('trim', explode(',', $packagesRaw)));
-        $skipTests = array_filter(array_map('trim', explode(',', $skipTestsRaw)));
+        // Build packages array from the two version fields
+        $packages = [];
+        if ($steamPkgVersion) {
+            $packages[] = 'Steam_' . $steamPkgVersion;
+        }
+        if ($steamuiPkgVersion) {
+            $packages[] = 'SteamUI_' . $steamuiPkgVersion;
+        }
 
         $version = $db->getClientVersion($id);
         if (!$version) {
@@ -76,7 +96,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } elseif (!$versionId) {
             setFlash('error', 'Version ID is required.');
         } else {
-            if ($db->updateClientVersion($id, $versionId, $displayName, $steamDate ?: null, $steamTime ?: null, $packages, $skipTests, $sortOrder, $isEnabled)) {
+            if ($db->updateClientVersion($id, $versionId, $displayName, $steamDate ?: null, $steamTime ?: null, $packages, [], $sortOrder, $isEnabled)) {
+                // Update template assignment (one-to-one relationship)
+                $db->setVersionTemplate($id, $templateId ?: null);
                 setFlash('success', "Client version updated successfully.");
             } else {
                 setFlash('error', 'Failed to update client version.');
@@ -201,23 +223,42 @@ $maxSortOrder = $db->getMaxClientVersionSortOrder();
                 </div>
             </div>
 
-            <div class="form-group">
-                <label for="packages">Packages</label>
-                <input type="text" id="packages" name="packages" placeholder="Steam_0, SteamUI_0">
-                <small class="form-hint">Comma-separated package names</small>
-            </div>
-
-            <div class="form-group">
-                <label for="skip_tests">Skip Tests</label>
-                <input type="text" id="skip_tests" name="skip_tests" placeholder="2a, 2b, 8, 15">
-                <small class="form-hint">Comma-separated test keys to skip</small>
-            </div>
-
             <div class="form-row">
-                <div class="form-group">
-                    <label for="sort_order">Sort Order</label>
-                    <input type="number" id="sort_order" name="sort_order" value="<?= $maxSortOrder + 1 ?>">
+                <div class="form-group" style="max-width: 150px;">
+                    <label for="steam_pkg_version">Steam PKG</label>
+                    <input type="text" id="steam_pkg_version" name="steam_pkg_version"
+                           placeholder="e.g., 14" pattern="[0-9]*" maxlength="5"
+                           style="text-align: center; font-family: monospace;"
+                           oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 5)">
+                    <small class="form-hint">Package number only</small>
                 </div>
+                <div class="form-group" style="max-width: 150px;">
+                    <label for="steamui_pkg_version">SteamUI PKG</label>
+                    <input type="text" id="steamui_pkg_version" name="steamui_pkg_version"
+                           placeholder="e.g., 120" pattern="[0-9]*" maxlength="5"
+                           style="text-align: center; font-family: monospace;"
+                           oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 5)">
+                    <small class="form-hint">Package number only</small>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="template_id">Test Template</label>
+                <select id="template_id" name="template_id">
+                    <option value="0">-- Use Default Template --</option>
+                    <?php foreach ($allTemplates as $template): ?>
+                        <?php if (!$template['is_default']): ?>
+                        <option value="<?= $template['id'] ?>">
+                            <?= e($template['name']) ?> (<?= count($template['test_keys'] ?? []) ?> tests)
+                        </option>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                </select>
+                <small class="form-hint">Select a template to limit visible tests for this version</small>
+            </div>
+
+            <input type="hidden" name="sort_order" value="<?= $maxSortOrder + 1 ?>">
+            <div class="form-row">
                 <div class="form-group">
                     <label class="checkbox-label">
                         <input type="checkbox" name="is_enabled" checked>
@@ -249,19 +290,20 @@ $maxSortOrder = $db->getMaxClientVersionSortOrder();
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th style="width: 50px;">Order</th>
                             <th>Version ID</th>
                             <th>Date</th>
                             <th>Packages</th>
-                            <th>Skip Tests</th>
+                            <th>Template</th>
                             <th style="width: 80px;">Status</th>
                             <th style="width: 120px;">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php foreach ($versions as $version): ?>
+                        <?php foreach ($versions as $version):
+                            // Get template for this version
+                            $versionTemplate = $db->getTemplateForVersion($version['id']);
+                        ?>
                             <tr class="version-row <?= $version['is_enabled'] ? '' : 'disabled-row' ?>" id="version-<?= $version['id'] ?>">
-                                <td class="version-order"><?= e($version['sort_order']) ?></td>
                                 <td class="version-id">
                                     <span class="version-id-text" title="<?= e($version['version_id']) ?>">
                                         <?= e(strlen($version['version_id']) > 60 ? substr($version['version_id'], 0, 60) . '...' : $version['version_id']) ?>
@@ -275,7 +317,16 @@ $maxSortOrder = $db->getMaxClientVersionSortOrder();
                                     <small><?= e(implode(', ', $version['packages'] ?: [])) ?></small>
                                 </td>
                                 <td>
-                                    <small class="text-muted"><?= count($version['skip_tests'] ?: []) ?> tests</small>
+                                    <?php if ($versionTemplate): ?>
+                                        <small class="<?= $versionTemplate['is_default'] ? 'text-muted' : '' ?>">
+                                            <?= e($versionTemplate['name']) ?>
+                                            <?php if (!$versionTemplate['is_default']): ?>
+                                                (<?= count($versionTemplate['test_keys'] ?? []) ?> tests)
+                                            <?php endif; ?>
+                                        </small>
+                                    <?php else: ?>
+                                        <small class="text-muted">Default</small>
+                                    <?php endif; ?>
                                 </td>
                                 <td>
                                     <?php if ($version['is_enabled']): ?>
@@ -284,8 +335,13 @@ $maxSortOrder = $db->getMaxClientVersionSortOrder();
                                         <span class="badge badge-secondary">Disabled</span>
                                     <?php endif; ?>
                                 </td>
+                                <?php
+                                    // Add template_id to version data for edit modal
+                                    $versionWithTemplate = $version;
+                                    $versionWithTemplate['template_id'] = $versionTemplate ? $versionTemplate['id'] : 0;
+                                ?>
                                 <td>
-                                    <button type="button" class="btn btn-sm btn-secondary" onclick="openEditModal(<?= htmlspecialchars(json_encode($version)) ?>)">Edit</button>
+                                    <button type="button" class="btn btn-sm btn-secondary" onclick="openEditModal(<?= htmlspecialchars(json_encode($versionWithTemplate)) ?>)">Edit</button>
                                     <form method="POST" style="display: inline;" onsubmit="return confirm('Delete this version? This will also delete all associated notifications.');">
                                         <input type="hidden" name="action" value="delete">
                                         <input type="hidden" name="id" value="<?= $version['id'] ?>">
@@ -333,21 +389,39 @@ $maxSortOrder = $db->getMaxClientVersionSortOrder();
                 </div>
             </div>
 
-            <div class="form-group">
-                <label for="edit_packages">Packages</label>
-                <input type="text" id="edit_packages" name="packages">
-            </div>
-
-            <div class="form-group">
-                <label for="edit_skip_tests">Skip Tests</label>
-                <input type="text" id="edit_skip_tests" name="skip_tests">
-            </div>
-
             <div class="form-row">
-                <div class="form-group">
-                    <label for="edit_sort_order">Sort Order</label>
-                    <input type="number" id="edit_sort_order" name="sort_order">
+                <div class="form-group" style="max-width: 150px;">
+                    <label for="edit_steam_pkg_version">Steam PKG</label>
+                    <input type="text" id="edit_steam_pkg_version" name="steam_pkg_version"
+                           placeholder="e.g., 14" pattern="[0-9]*" maxlength="5"
+                           style="text-align: center; font-family: monospace;"
+                           oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 5)">
                 </div>
+                <div class="form-group" style="max-width: 150px;">
+                    <label for="edit_steamui_pkg_version">SteamUI PKG</label>
+                    <input type="text" id="edit_steamui_pkg_version" name="steamui_pkg_version"
+                           placeholder="e.g., 120" pattern="[0-9]*" maxlength="5"
+                           style="text-align: center; font-family: monospace;"
+                           oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 5)">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="edit_template_id">Test Template</label>
+                <select id="edit_template_id" name="template_id">
+                    <option value="0">-- Use Default Template --</option>
+                    <?php foreach ($allTemplates as $template): ?>
+                        <?php if (!$template['is_default']): ?>
+                        <option value="<?= $template['id'] ?>">
+                            <?= e($template['name']) ?> (<?= count($template['test_keys'] ?? []) ?> tests)
+                        </option>
+                        <?php endif; ?>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <input type="hidden" id="edit_sort_order" name="sort_order">
+            <div class="form-row">
                 <div class="form-group">
                     <label class="checkbox-label">
                         <input type="checkbox" name="is_enabled" id="edit_is_enabled">
@@ -506,8 +580,21 @@ function openEditModal(version) {
     document.getElementById('edit_display_name').value = version.display_name || '';
     document.getElementById('edit_steam_date').value = version.steam_date || '';
     document.getElementById('edit_steam_time').value = version.steam_time || '';
-    document.getElementById('edit_packages').value = (version.packages || []).join(', ');
-    document.getElementById('edit_skip_tests').value = (version.skip_tests || []).join(', ');
+
+    // Parse packages array to extract version numbers
+    var steamPkg = '';
+    var steamuiPkg = '';
+    (version.packages || []).forEach(function(pkg) {
+        if (pkg.indexOf('Steam_') === 0 && pkg.indexOf('SteamUI_') !== 0) {
+            steamPkg = pkg.replace('Steam_', '');
+        } else if (pkg.indexOf('SteamUI_') === 0) {
+            steamuiPkg = pkg.replace('SteamUI_', '');
+        }
+    });
+    document.getElementById('edit_steam_pkg_version').value = steamPkg;
+    document.getElementById('edit_steamui_pkg_version').value = steamuiPkg;
+
+    document.getElementById('edit_template_id').value = version.template_id || 0;
     document.getElementById('edit_sort_order').value = version.sort_order;
     document.getElementById('edit_is_enabled').checked = version.is_enabled == 1;
     document.getElementById('editModal').style.display = 'flex';

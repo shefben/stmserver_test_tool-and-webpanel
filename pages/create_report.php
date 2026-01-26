@@ -20,9 +20,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $commitHash = trim($_POST['commit_hash'] ?? '');
     $steamuiVersion = preg_replace('/[^0-9]/', '', $_POST['steamui_version'] ?? '');
     $steamPkgVersion = preg_replace('/[^0-9]/', '', $_POST['steam_pkg_version'] ?? '');
-    // Limit to 9 digits
-    $steamuiVersion = substr($steamuiVersion, 0, 9);
-    $steamPkgVersion = substr($steamPkgVersion, 0, 9);
+    // Limit to 5 digits
+    $steamuiVersion = substr($steamuiVersion, 0, 5);
+    $steamPkgVersion = substr($steamPkgVersion, 0, 5);
     $tester = $user['username'];
     $statuses = $_POST['status'] ?? [];
     $notes = $_POST['notes'] ?? [];
@@ -170,7 +170,7 @@ if (isGitHubConfigured()) {
 
         <div class="form-row">
             <div class="form-group">
-                <label>Client Version *</label>
+                <label>Client Version * <span style="color: var(--status-broken); font-size: 11px;">(Select first to continue)</span></label>
                 <select name="client_version" id="client_version" required>
                     <option value="">-- Select a client version --</option>
                     <?php if (!empty($clientVersions)): ?>
@@ -192,18 +192,18 @@ if (isGitHubConfigured()) {
                 </select>
                 <small style="color: var(--text-muted);">Select the client version being tested</small>
             </div>
-            <div class="form-group">
+            <div class="form-group disabled-until-version">
                 <label>Test Type</label>
-                <select name="test_type">
+                <select name="test_type" disabled>
                     <option value="WAN" <?= ($_POST['test_type'] ?? 'WAN') === 'WAN' ? 'selected' : '' ?>>WAN</option>
                     <option value="LAN" <?= ($_POST['test_type'] ?? '') === 'LAN' ? 'selected' : '' ?>>LAN</option>
                 </select>
             </div>
-            <div class="form-group">
+            <div class="form-group disabled-until-version">
                 <label>Commit Hash</label>
                 <?php if (!empty($revisionOptions)): ?>
                     <div style="display: flex; gap: 8px; align-items: center;">
-                        <select name="commit_hash" id="commit_hash_select" style="flex: 1;">
+                        <select name="commit_hash" id="commit_hash_select" style="flex: 1;" disabled>
                             <option value="">-- Select a revision --</option>
                             <?php foreach ($revisionOptions as $opt): ?>
                                 <option value="<?= e($opt['hash']) ?>" <?= ($_POST['commit_hash'] ?? '') === $opt['hash'] ? 'selected' : '' ?>>
@@ -211,30 +211,28 @@ if (isGitHubConfigured()) {
                                 </option>
                             <?php endforeach; ?>
                         </select>
-                        <a href="#" onclick="showRevisionNotes(); return false;" class="btn btn-sm btn-secondary" title="View Revision Notes">Notes</a>
+                        <a href="#" onclick="showRevisionNotes(); return false;" class="btn btn-sm btn-secondary disabled-until-version-btn" title="View Revision Notes">Notes</a>
                     </div>
                     <small style="color: var(--text-muted);">Select a git revision or leave blank</small>
                 <?php else: ?>
-                    <input type="text" name="commit_hash" value="<?= e($_POST['commit_hash'] ?? '') ?>" placeholder="Optional">
+                    <input type="text" name="commit_hash" value="<?= e($_POST['commit_hash'] ?? '') ?>" placeholder="Optional" disabled>
                     <small style="color: var(--text-muted);">Git commit hash if known</small>
                 <?php endif; ?>
             </div>
         </div>
 
         <div class="form-row">
-            <div class="form-group">
-                <label>SteamUI Version</label>
+            <div class="form-group disabled-until-version" style="max-width: 180px;">
+                <label>SteamUI PKG Version</label>
                 <input type="text" name="steamui_version" value="<?= e($_POST['steamui_version'] ?? '') ?>"
-                       placeholder="e.g., 123456789" pattern="[0-9]*" maxlength="9"
-                       oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 9)">
-                <small style="color: var(--text-muted);">Numbers only, max 9 digits</small>
+                       placeholder="e.g., 12345" pattern="[0-9]*" maxlength="5" style="text-align: center; font-family: monospace;"
+                       oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 5)" disabled>
             </div>
-            <div class="form-group">
+            <div class="form-group disabled-until-version" style="max-width: 180px;">
                 <label>Steam PKG Version</label>
                 <input type="text" name="steam_pkg_version" value="<?= e($_POST['steam_pkg_version'] ?? '') ?>"
-                       placeholder="e.g., 123456789" pattern="[0-9]*" maxlength="9"
-                       oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 9)">
-                <small style="color: var(--text-muted);">Numbers only, max 9 digits</small>
+                       placeholder="e.g., 12345" pattern="[0-9]*" maxlength="5" style="text-align: center; font-family: monospace;"
+                       oninput="this.value = this.value.replace(/[^0-9]/g, '').slice(0, 5)" disabled>
             </div>
         </div>
 
@@ -252,70 +250,14 @@ if (isGitHubConfigured()) {
         </div>
     </div>
 
-    <!-- Template Selection -->
-    <?php if (!empty($templates)): ?>
-    <div class="card" style="margin-bottom: 30px;">
-        <h3 class="card-title" style="display: flex; align-items: center; gap: 10px;">
-            <span style="font-size: 20px;">📋</span>
-            Test Template
-        </h3>
-        <p style="color: var(--text-muted); margin-bottom: 15px;">
-            Apply a template to quickly set up tests. Tests in the template will be set to the specified default status,
-            and tests NOT in the template will be set to N/A.
-        </p>
-
-        <div class="form-row">
-            <div class="form-group" style="flex: 2;">
-                <label>Select Template</label>
-                <select id="template_select" onchange="onTemplateChange()">
-                    <option value="">-- No template (manual entry) --</option>
-                    <?php foreach ($templates as $template): ?>
-                        <option value="<?= $template['id'] ?>"
-                                data-test-keys="<?= e(json_encode($template['test_keys'])) ?>"
-                                <?= $template['is_default'] ? 'data-default="1"' : '' ?>>
-                            <?= e($template['name']) ?>
-                            <?php if ($template['is_default']): ?> (Default)<?php endif; ?>
-                            <?php if ($template['is_system']): ?> [System]<?php endif; ?>
-                            (<?= count($template['test_keys']) ?> tests)
-                        </option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            <div class="form-group" style="flex: 1;">
-                <label>Default Status for Template Tests</label>
-                <select id="template_default_status">
-                    <option value="Working">Working</option>
-                    <option value="Semi-working">Semi-working</option>
-                    <option value="Not working">Not working</option>
-                    <option value="">No change (keep current)</option>
-                </select>
-            </div>
-            <div class="form-group" style="flex: 0 0 auto; display: flex; align-items: flex-end;">
-                <button type="button" class="btn btn-secondary" onclick="applyTemplate()" id="apply_template_btn" disabled>
-                    Apply Template
-                </button>
-            </div>
-        </div>
-
-        <div id="template_description" style="margin-top: 10px; padding: 10px; background: var(--bg-accent); border-radius: 4px; display: none;">
-            <strong>Template:</strong> <span id="template_name"></span><br>
-            <span id="template_desc" style="color: var(--text-muted);"></span>
-        </div>
-
-        <!-- Version-based skip tests (auto-applies when version is entered) -->
-        <?php if (!empty($clientVersions)): ?>
-        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--border);">
-            <p style="color: var(--text-muted); font-size: 13px;">
-                <strong>💡 Tip:</strong> Some client versions have pre-configured skip tests. When you select a matching
-                client version above, tests that are known to be N/A for that version will be automatically marked.
-            </p>
-        </div>
-        <?php endif; ?>
+    <!-- Auto-Applied Template Banner (shown when version is selected) -->
+    <div id="template-banner" class="template-banner" style="display: none; margin-bottom: 30px;">
+        <span class="template-icon">📋</span>
+        <span id="template-banner-text">Template auto-applied</span>
     </div>
-    <?php endif; ?>
 
     <!-- Log Files Upload -->
-    <div class="card" style="margin-bottom: 30px;">
+    <div class="card disabled-section-until-version" id="log-upload-section" style="margin-bottom: 30px;">
         <h3 class="card-title" style="display: flex; align-items: center; gap: 10px;">
             <span style="font-size: 20px;">📄</span>
             Debug Log Files
@@ -351,79 +293,36 @@ if (isGitHubConfigured()) {
         </div>
     </div>
 
-    <!-- Test Results -->
-    <div class="card">
+    <!-- Test Results - Initially hidden until version selected -->
+    <div class="card disabled-section-until-version" id="test-results-section">
         <h3 class="card-title">Test Results</h3>
-        <p style="color: var(--text-muted); margin-bottom: 20px;">
-            Set the status for each test. Tests left as "N/A" will be recorded but not counted in statistics.
-        </p>
 
-        <div class="quick-actions" style="margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
-            <button type="button" class="btn btn-sm btn-secondary" onclick="setAllStatus('Working')">Set All Working</button>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="setAllStatus('Not working')">Set All Not Working</button>
-            <button type="button" class="btn btn-sm btn-secondary" onclick="setAllStatus('N/A')">Set All N/A</button>
+        <!-- Placeholder shown when no version selected -->
+        <div id="no-version-placeholder" style="text-align: center; padding: 40px 20px; color: var(--text-muted);">
+            <div style="font-size: 48px; margin-bottom: 15px; opacity: 0.5;">📋</div>
+            <p style="font-size: 16px; margin-bottom: 10px;">Please select a client version first</p>
+            <p style="font-size: 13px;">Test questions will be loaded based on the version's assigned template.</p>
         </div>
 
-        <?php foreach ($categories as $categoryName => $tests): ?>
-            <div class="category-section">
-                <h4 class="category-title"><?= e($categoryName) ?></h4>
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th style="width: 60px; min-width: 60px;">Key</th>
-                                <th style="width: 30%; min-width: 200px;">Test Name</th>
-                                <th style="width: 150px; min-width: 150px;">Status</th>
-                                <th style="width: auto;">Notes</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php foreach ($tests as $testKey => $testInfo): ?>
-                                <?php
-                                $currentStatus = $_POST['status'][$testKey] ?? 'N/A';
-                                $currentNotes = $_POST['notes'][$testKey] ?? '';
-                                ?>
-                                <tr>
-                                    <td style="font-family: monospace; font-weight: bold; color: var(--primary);">
-                                        <?= e($testKey) ?>
-                                    </td>
-                                    <td>
-                                        <div style="font-weight: 500;"><?= e($testInfo['name']) ?></div>
-                                        <?php if (!empty($testInfo['expected'])): ?>
-                                            <div style="font-size: 12px; color: var(--text-muted);">
-                                                <?= e($testInfo['expected']) ?>
-                                            </div>
-                                        <?php endif; ?>
-                                    </td>
-                                    <td>
-                                        <select name="status[<?= e($testKey) ?>]" class="status-select <?= strtolower(str_replace(' ', '-', $currentStatus)) ?>">
-                                            <option value="Working" <?= $currentStatus === 'Working' ? 'selected' : '' ?>>Working</option>
-                                            <option value="Partially Working" <?= $currentStatus === 'Partially Working' ? 'selected' : '' ?>>Partially Working</option>
-                                            <option value="Semi-working" <?= $currentStatus === 'Semi-working' ? 'selected' : '' ?>>Semi-working</option>
-                                            <option value="Not working" <?= $currentStatus === 'Not working' ? 'selected' : '' ?>>Not Working</option>
-                                            <option value="N/A" <?= $currentStatus === 'N/A' ? 'selected' : '' ?>>N/A</option>
-                                        </select>
-                                    </td>
-                                    <td>
-                                        <div class="notes-input-wrapper">
-                                            <textarea name="notes[<?= e($testKey) ?>]"
-                                                      placeholder="Notes (drag &amp; drop images)"
-                                                      class="notes-input notes-textarea"
-                                                      rows="1"><?= e($currentNotes) ?></textarea>
-                                            <div class="notes-image-preview" style="display: none;"></div>
-                                        </div>
-                                    </td>
-                                </tr>
-                            <?php endforeach; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        <?php endforeach; ?>
+        <!-- Loaded tests container -->
+        <div id="tests-container" style="display: none;">
+            <p style="color: var(--text-muted); margin-bottom: 20px;">
+                Set the status for each test. Tests left as "N/A" will be recorded but not counted in statistics.
+            </p>
 
-        <div class="form-actions" style="margin-top: 20px;">
-            <button type="submit" class="btn btn-lg">Create Report</button>
-            <a href="?page=my_reports" class="btn btn-secondary btn-lg">Cancel</a>
+            <div class="quick-actions" style="margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+                <button type="button" class="btn btn-sm btn-secondary" onclick="setAllStatus('Working')">Set All Working</button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="setAllStatus('Not working')">Set All Not Working</button>
+                <button type="button" class="btn btn-sm btn-secondary" onclick="setAllStatus('N/A')">Set All N/A</button>
+            </div>
+
+            <!-- Tests will be loaded here via AJAX -->
+            <div id="tests-list"></div>
+
+            <div class="form-actions" style="margin-top: 20px;">
+                <button type="submit" class="btn btn-lg" id="submit-btn" disabled>Create Report</button>
+                <a href="?page=my_reports" class="btn btn-secondary btn-lg">Cancel</a>
+            </div>
         </div>
     </div>
 </form>
@@ -658,164 +557,338 @@ if (isGitHubConfigured()) {
     gap: 15px;
     justify-content: center;
 }
+
+/* Template auto-filter banner */
+.template-banner {
+    background: linear-gradient(135deg, rgba(126, 166, 75, 0.15) 0%, rgba(126, 166, 75, 0.05) 100%);
+    border: 1px solid rgba(126, 166, 75, 0.4);
+    border-radius: 8px;
+    padding: 12px 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+}
+
+.template-banner .template-icon {
+    font-size: 18px;
+}
+
+.template-banner .template-name {
+    font-weight: 600;
+    color: var(--primary);
+}
+
+.template-banner .template-count {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
+/* Disabled sections until version selected */
+.disabled-section-until-version {
+    opacity: 0.5;
+    pointer-events: none;
+    position: relative;
+}
+
+.disabled-section-until-version::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+}
+
+.disabled-section-until-version.enabled {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.disabled-section-until-version.enabled::after {
+    display: none;
+}
+
+/* Disabled form groups */
+.disabled-until-version {
+    opacity: 0.5;
+}
+
+.disabled-until-version.enabled {
+    opacity: 1;
+}
+
+.disabled-until-version-btn {
+    pointer-events: none;
+    opacity: 0.5;
+}
+
+.disabled-until-version-btn.enabled {
+    pointer-events: auto;
+    opacity: 1;
+}
+
+/* Loading spinner for tests */
+.tests-loading {
+    text-align: center;
+    padding: 40px;
+    color: var(--text-muted);
+}
+
+.tests-loading .spinner {
+    display: inline-block;
+    width: 40px;
+    height: 40px;
+    border: 3px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: 15px;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
 </style>
 
 <script>
-// Update select color on change
-document.querySelectorAll('.status-select').forEach(select => {
-    select.addEventListener('change', function() {
-        // Replace all spaces with dashes for proper class name
-        this.className = 'status-select ' + this.value.toLowerCase().replace(/ /g, '-');
-    });
-});
+// Helper function to escape HTML - defined first for use throughout
+function escapeHtml(text) {
+    if (text === null || text === undefined) return '';
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
 
-// Set all statuses
+// Set all statuses (works with dynamically created selects)
 function setAllStatus(status) {
-    document.querySelectorAll('.status-select').forEach(select => {
+    document.querySelectorAll('.status-select').forEach(function(select) {
         select.value = status;
-        // Replace all spaces with dashes for proper class name
         select.className = 'status-select ' + status.toLowerCase().replace(/ /g, '-');
     });
 }
 
-// ==================== Template Functions ====================
+// ==================== Version Selection and Form Enabling ====================
 
-// Template data from PHP
-var templatesData = <?= json_encode(array_map(function($t) {
-    return [
-        'id' => $t['id'],
-        'name' => $t['name'],
-        'description' => $t['description'],
-        'test_keys' => $t['test_keys'],
-        'is_default' => $t['is_default']
-    ];
-}, $templates), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
-
-// Client version skip tests data
-var clientVersionsData = <?= json_encode(array_map(function($v) {
-    return [
-        'id' => $v['id'],
-        'version_id' => $v['version_id'],
-        'skip_tests' => json_decode($v['skip_tests'] ?? '[]', true) ?: []
-    ];
-}, $clientVersions), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
-
-// Handle template selection change
-function onTemplateChange() {
-    var select = document.getElementById('template_select');
-    var applyBtn = document.getElementById('apply_template_btn');
-    var descDiv = document.getElementById('template_description');
-
-    if (select.value) {
-        applyBtn.disabled = false;
-        // Find template data
-        var template = templatesData.find(t => t.id == select.value);
-        if (template) {
-            document.getElementById('template_name').textContent = template.name;
-            document.getElementById('template_desc').textContent = template.description || 'No description';
-            descDiv.style.display = 'block';
-        }
-    } else {
-        applyBtn.disabled = true;
-        descDiv.style.display = 'none';
-    }
-}
-
-// Apply selected template
-function applyTemplate() {
-    var select = document.getElementById('template_select');
-    var defaultStatus = document.getElementById('template_default_status').value;
-
-    if (!select.value) {
-        alert('Please select a template first.');
-        return;
-    }
-
-    // Find template data
-    var template = templatesData.find(t => t.id == select.value);
-    if (!template) {
-        alert('Template not found.');
-        return;
-    }
-
-    var testKeys = template.test_keys || [];
-    var testKeysSet = new Set(testKeys);
-    var applied = 0;
-    var skipped = 0;
-
-    // Apply to all status selects
-    document.querySelectorAll('.status-select').forEach(select => {
-        // Extract test key from the select name: status[test_key]
-        var match = select.name.match(/status\[([^\]]+)\]/);
-        if (!match) return;
-
-        var testKey = match[1];
-
-        if (testKeysSet.has(testKey)) {
-            // Test is in template - set to default status (if specified)
-            if (defaultStatus) {
-                select.value = defaultStatus;
-                select.className = 'status-select ' + defaultStatus.toLowerCase().replace(' ', '-');
-            }
-            applied++;
-        } else {
-            // Test is NOT in template - set to N/A
-            select.value = 'N/A';
-            select.className = 'status-select n/a';
-            skipped++;
-        }
-    });
-
-    alert('Template applied!\n\n' + applied + ' tests set to "' + (defaultStatus || 'unchanged') + '"\n' + skipped + ' tests set to "N/A"');
-}
-
-// Apply version-based skip tests when client version changes
-function applyVersionSkipTests() {
+// Called when client version changes - loads tests and enables form
+function onVersionChange() {
     var versionSelect = document.querySelector('select[name="client_version"]');
-    if (!versionSelect) return;
+    var version = versionSelect ? versionSelect.value : '';
 
-    var version = versionSelect.value.trim();
-    if (!version) return;
-
-    // Find matching client version
-    var clientVersion = clientVersionsData.find(v =>
-        v.version_id === version || v.version_id.includes(version) || version.includes(v.version_id)
-    );
-
-    if (!clientVersion || !clientVersion.skip_tests || clientVersion.skip_tests.length === 0) {
+    if (!version) {
+        disableFormSections();
+        hideTemplateBanner();
+        showNoVersionPlaceholder();
         return;
     }
 
-    var skipTests = new Set(clientVersion.skip_tests);
-    var skipped = 0;
+    // Enable form sections
+    enableFormSections();
 
-    document.querySelectorAll('.status-select').forEach(select => {
-        var match = select.name.match(/status\[([^\]]+)\]/);
-        if (!match) return;
+    // Show loading state
+    showTestsLoading();
 
-        var testKey = match[1];
-        if (skipTests.has(testKey)) {
-            select.value = 'N/A';
-            select.className = 'status-select n/a';
-            skipped++;
-        }
+    // Fetch tests for this version via API
+    fetch('api/tests.php?client_version=' + encodeURIComponent(version))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.success) {
+                renderTests(data);
+                if (data.template) {
+                    showTemplateBanner(data.template.name, data.tests.length);
+                } else {
+                    hideTemplateBanner();
+                }
+            } else {
+                showTestsError('Failed to load tests: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(function(err) {
+            console.error('Error loading tests:', err);
+            showTestsError('Error loading tests. Please try again.');
+        });
+}
+
+// Disable all form sections until version is selected
+function disableFormSections() {
+    // Disable form groups
+    document.querySelectorAll('.disabled-until-version').forEach(function(el) {
+        el.classList.remove('enabled');
+        var inputs = el.querySelectorAll('input, select, textarea');
+        inputs.forEach(function(input) { input.disabled = true; });
     });
 
-    if (skipped > 0) {
-        console.log('Auto-skipped ' + skipped + ' tests for version: ' + version);
+    // Disable buttons
+    document.querySelectorAll('.disabled-until-version-btn').forEach(function(el) {
+        el.classList.remove('enabled');
+    });
+
+    // Disable sections
+    document.querySelectorAll('.disabled-section-until-version').forEach(function(el) {
+        el.classList.remove('enabled');
+    });
+
+    // Disable submit button
+    var submitBtn = document.getElementById('submit-btn');
+    if (submitBtn) submitBtn.disabled = true;
+}
+
+// Enable all form sections after version is selected
+function enableFormSections() {
+    // Enable form groups
+    document.querySelectorAll('.disabled-until-version').forEach(function(el) {
+        el.classList.add('enabled');
+        var inputs = el.querySelectorAll('input, select, textarea');
+        inputs.forEach(function(input) { input.disabled = false; });
+    });
+
+    // Enable buttons
+    document.querySelectorAll('.disabled-until-version-btn').forEach(function(el) {
+        el.classList.add('enabled');
+    });
+
+    // Enable sections
+    document.querySelectorAll('.disabled-section-until-version').forEach(function(el) {
+        el.classList.add('enabled');
+    });
+
+    // Enable submit button
+    var submitBtn = document.getElementById('submit-btn');
+    if (submitBtn) submitBtn.disabled = false;
+}
+
+// Show placeholder when no version selected
+function showNoVersionPlaceholder() {
+    document.getElementById('no-version-placeholder').style.display = 'block';
+    document.getElementById('tests-container').style.display = 'none';
+}
+
+// Show loading spinner while tests load
+function showTestsLoading() {
+    document.getElementById('no-version-placeholder').style.display = 'none';
+    document.getElementById('tests-container').style.display = 'block';
+    document.getElementById('tests-list').innerHTML =
+        '<div class="tests-loading">' +
+        '<div class="spinner"></div>' +
+        '<p>Loading tests...</p>' +
+        '</div>';
+}
+
+// Show error message
+function showTestsError(message) {
+    document.getElementById('tests-list').innerHTML =
+        '<div class="alert alert-error">' + escapeHtml(message) + '</div>';
+}
+
+// Render tests from API response
+function renderTests(data) {
+    var container = document.getElementById('tests-list');
+    var html = '';
+
+    // Group tests by category
+    var grouped = data.grouped || {};
+
+    for (var categoryName in grouped) {
+        if (!grouped.hasOwnProperty(categoryName)) continue;
+        var tests = grouped[categoryName];
+
+        html += '<div class="category-section">';
+        html += '<h4 class="category-title">' + escapeHtml(categoryName) + '</h4>';
+        html += '<div class="table-container"><table>';
+        html += '<thead><tr>';
+        html += '<th style="width: 60px; min-width: 60px;">Key</th>';
+        html += '<th style="width: 30%; min-width: 200px;">Test Name</th>';
+        html += '<th style="width: 150px; min-width: 150px;">Status</th>';
+        html += '<th style="width: auto;">Notes</th>';
+        html += '</tr></thead><tbody>';
+
+        tests.forEach(function(test) {
+            var testKey = test.test_key;
+            var testName = test.name;
+            var testDesc = test.description || '';
+
+            html += '<tr data-test-key="' + escapeHtml(testKey) + '">';
+            html += '<td style="font-family: monospace; font-weight: bold; color: var(--primary);">' + escapeHtml(testKey) + '</td>';
+            html += '<td>';
+            html += '<div style="font-weight: 500;">' + escapeHtml(testName) + '</div>';
+            if (testDesc) {
+                html += '<div style="font-size: 12px; color: var(--text-muted);">' + escapeHtml(testDesc) + '</div>';
+            }
+            html += '</td>';
+            html += '<td>';
+            html += '<select name="status[' + escapeHtml(testKey) + ']" class="status-select n/a">';
+            html += '<option value="Working">Working</option>';
+            html += '<option value="Partially Working">Partially Working</option>';
+            html += '<option value="Semi-working">Semi-working</option>';
+            html += '<option value="Not working">Not Working</option>';
+            html += '<option value="N/A" selected>N/A</option>';
+            html += '</select>';
+            html += '</td>';
+            html += '<td>';
+            html += '<div class="notes-input-wrapper">';
+            html += '<textarea name="notes[' + escapeHtml(testKey) + ']" placeholder="Notes (drag &amp; drop images)" class="notes-input notes-textarea" rows="1"></textarea>';
+            html += '<div class="notes-image-preview" style="display: none;"></div>';
+            html += '</div>';
+            html += '</td>';
+            html += '</tr>';
+        });
+
+        html += '</tbody></table></div></div>';
+    }
+
+    container.innerHTML = html;
+
+    // Re-initialize event listeners for dynamically created elements
+    initStatusSelectListeners();
+    initNotesImageDragDrop();
+}
+
+// Initialize status select change listeners
+function initStatusSelectListeners() {
+    document.querySelectorAll('.status-select').forEach(function(select) {
+        select.addEventListener('change', function() {
+            this.className = 'status-select ' + this.value.toLowerCase().replace(/ /g, '-');
+        });
+    });
+}
+
+// Show template banner with info
+function showTemplateBanner(templateName, testCount) {
+    var banner = document.getElementById('template-banner');
+    var bannerText = document.getElementById('template-banner-text');
+    if (banner && bannerText) {
+        bannerText.innerHTML = 'Template: <span class="template-name">' +
+            escapeHtml(templateName || 'Version-specific') + '</span>' +
+            '<span class="template-count">' + testCount + ' tests visible</span>';
+        banner.style.display = 'flex';
+    }
+}
+
+// Hide template banner
+function hideTemplateBanner() {
+    var banner = document.getElementById('template-banner');
+    if (banner) {
+        banner.style.display = 'none';
     }
 }
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
-    // Add change listener to client version dropdown for auto-skip
+    // Add change listener to client version dropdown
     var versionSelect = document.querySelector('select[name="client_version"]');
     if (versionSelect) {
-        versionSelect.addEventListener('change', applyVersionSkipTests);
+        versionSelect.addEventListener('change', onVersionChange);
+        // Check if version already selected (e.g., after form validation error)
+        if (versionSelect.value) {
+            onVersionChange();
+        } else {
+            // Initially disable form sections
+            disableFormSections();
+        }
     }
-
-    // Initialize template selector state
-    onTemplateChange();
 });
 
 // ==================== Log File Upload Functions ====================
@@ -1034,13 +1107,6 @@ function showRevisionNotes() {
     content += '</div>';
 
     showPopup('Revision: ' + sha.substring(0, 8), content);
-}
-
-// Helper function to escape HTML
-function escapeHtml(text) {
-    var div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
 
 // Show popup dialog

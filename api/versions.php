@@ -37,7 +37,7 @@ if ($method === 'GET') {
                 'packages' => $v['packages'] ?: [],
                 'steam_date' => $v['steam_date'],
                 'steam_time' => $v['steam_time'],
-                'skip_tests' => $v['skip_tests'] ?: [],
+                'skip_tests' => [], // Deprecated: use templates instead (api/tests.php?client_version=X)
                 'display_name' => $v['display_name'],
                 'sort_order' => $v['sort_order'],
                 'is_enabled' => (bool)$v['is_enabled']

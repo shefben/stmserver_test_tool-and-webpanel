@@ -12,11 +12,10 @@ require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/functions.php';
 require_once __DIR__ . '/../includes/test_keys.php';
 
-// Authenticate via API key
-if (!requireApiAuth()) {
-    http_response_code(401);
-    echo json_encode(['error' => 'Invalid or missing API key. Include X-API-Key header.']);
-    exit;
+// Authenticate via session (web UI) or API key (Python tool)
+if (!isLoggedIn()) {
+    // No session - try API key authentication
+    requireApiAuth();
 }
 
 $db = Database::getInstance();
@@ -30,7 +29,6 @@ if ($method === 'GET') {
     // Get version-specific template if client_version provided
     $templateTestKeys = null;
     $templateInfo = null;
-    $versionSkipTests = [];
     if ($clientVersion) {
         $template = $db->getTemplateForVersionString($clientVersion);
         if ($template && !empty($template['test_keys'])) {
@@ -40,12 +38,6 @@ if ($method === 'GET') {
                 'name' => $template['name'],
                 'is_default' => (bool)$template['is_default']
             ];
-        }
-
-        // Get skip_tests from the client version (synced with admin_versions settings)
-        $versionData = $db->getClientVersionByVersionId($clientVersion);
-        if ($versionData && !empty($versionData['skip_tests'])) {
-            $versionSkipTests = $versionData['skip_tests'];
         }
     }
 
@@ -156,18 +148,14 @@ if ($method === 'GET') {
         'tests' => $tests,
         'grouped' => $grouped,
         'total_tests' => count($tests),
-        'total_categories' => count($categories)
+        'total_categories' => count($categories),
+        'filtered' => ($templateTestKeys !== null && $templateInfo !== null && !$templateInfo['is_default'])
     ];
 
     // Include template info if a version-specific template was applied
     if ($templateInfo !== null) {
         $response['template'] = $templateInfo;
-    }
-
-    // Include skip_tests from client version settings (synced with admin_versions page)
-    // This allows the client to know which tests to skip without needing a separate API call
-    if (!empty($versionSkipTests)) {
-        $response['skip_tests'] = $versionSkipTests;
+        $response['filtered'] = !$templateInfo['is_default']; // Only filtered if not default template
     }
 
     echo json_encode($response);

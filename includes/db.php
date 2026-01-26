@@ -2211,6 +2211,34 @@ class Database {
     }
 
     /**
+     * Set a single template for a client version (one-to-one relationship)
+     * Removes version from any existing template first, then assigns to new template
+     * If templateId is 0 or null, just removes from all templates (uses default)
+     *
+     * @param int $clientVersionId The client version database ID
+     * @param int|null $templateId The template ID to assign, or null/0 to use default
+     * @return bool Success
+     */
+    public function setVersionTemplate($clientVersionId, $templateId = null) {
+        $this->ensureTemplateVersionsTable();
+
+        // First, remove this version from ALL templates (enforce one-to-one)
+        $stmt = $this->pdo->prepare("DELETE FROM test_template_versions WHERE client_version_id = ?");
+        $stmt->execute([$clientVersionId]);
+
+        // If a specific template is requested (not default), assign it
+        if ($templateId && $templateId > 0) {
+            $stmt = $this->pdo->prepare("
+                INSERT INTO test_template_versions (template_id, client_version_id)
+                VALUES (?, ?)
+            ");
+            $stmt->execute([$templateId, $clientVersionId]);
+        }
+
+        return true;
+    }
+
+    /**
      * Get template for a specific client version
      * Returns version-specific template if assigned, otherwise returns default template
      */
@@ -2235,7 +2263,10 @@ class Database {
         }
 
         if ($template) {
-            $template['test_keys'] = json_decode($template['test_keys'], true) ?? [];
+            // Only decode if test_keys is still a string (not already decoded)
+            if (is_string($template['test_keys'])) {
+                $template['test_keys'] = json_decode($template['test_keys'], true) ?? [];
+            }
         }
 
         return $template ?: null;
@@ -2250,6 +2281,64 @@ class Database {
             return $this->getDefaultTemplate();
         }
         return $this->getTemplateForVersion($version['id']);
+    }
+
+    /**
+     * Get visible tests for a client version, filtered by applicable template.
+     * Resolution: version-specific template → default template → all tests
+     *
+     * @param string|null $versionString The client version string
+     * @param bool $returnMetadata If true, returns ['categories' => [...], 'template' => [...]]
+     * @return array Categories array filtered by template, or full response with metadata
+     */
+    public function getVisibleTestsForVersion($versionString, $returnMetadata = false) {
+        // Resolve template for this version
+        $template = $versionString ? $this->getTemplateForVersionString($versionString) : null;
+
+        // Get all test categories (from DB or TEST_KEYS constant)
+        $allCategories = $this->hasTestCategoriesTable()
+            ? $this->getTestTypesGrouped(true)
+            : getTestCategories();
+
+        // No template or empty test_keys = return all tests (no filtering)
+        if (!$template || empty($template['test_keys'])) {
+            if ($returnMetadata) {
+                return [
+                    'categories' => $allCategories,
+                    'template' => null,
+                    'filtered' => false
+                ];
+            }
+            return $allCategories;
+        }
+
+        // Filter categories to only include tests in template
+        $templateTestKeys = array_flip($template['test_keys']); // O(1) lookup
+        $filteredCategories = [];
+
+        foreach ($allCategories as $categoryName => $tests) {
+            $filteredTests = array_intersect_key($tests, $templateTestKeys);
+            // Only include category if it has visible tests
+            if (!empty($filteredTests)) {
+                $filteredCategories[$categoryName] = $filteredTests;
+            }
+        }
+
+        if ($returnMetadata) {
+            return [
+                'categories' => $filteredCategories,
+                'template' => [
+                    'id' => $template['id'],
+                    'name' => $template['name'],
+                    'is_default' => (bool)$template['is_default'],
+                    'test_count' => count($template['test_keys']),
+                    'test_keys' => $template['test_keys']
+                ],
+                'filtered' => true
+            ];
+        }
+
+        return $filteredCategories;
     }
 
     /**

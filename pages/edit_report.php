@@ -110,8 +110,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-// Get categories
-$categories = getTestCategories();
+// Get categories filtered by template for this version
+$templateData = $db->getVisibleTestsForVersion($report['client_version'], true);
+$categories = $templateData['categories'];
+$appliedTemplate = $templateData['template'];
 
 // Get pending retest requests map for this version
 $pendingRetestMap = $db->getPendingRetestRequestsMap();
@@ -141,6 +143,14 @@ $clientVersion = $report['client_version'];
 
 <?php if ($success): ?>
     <div class="alert alert-success"><?= e($success) ?></div>
+<?php endif; ?>
+
+<?php if ($appliedTemplate && !$appliedTemplate['is_default']): ?>
+<div class="template-banner" style="margin-bottom: 20px;">
+    <span class="template-icon">📋</span>
+    <span>Template: <strong class="template-name"><?= e($appliedTemplate['name']) ?></strong></span>
+    <span class="template-count"><?= count($appliedTemplate['test_keys']) ?> tests visible</span>
+</div>
 <?php endif; ?>
 
 <!-- Report Metadata -->
@@ -360,6 +370,32 @@ $clientVersion = $report['client_version'];
 </div>
 
 <style>
+/* Template banner */
+.template-banner {
+    background: linear-gradient(135deg, rgba(126, 166, 75, 0.15) 0%, rgba(126, 166, 75, 0.05) 100%);
+    border: 1px solid rgba(126, 166, 75, 0.4);
+    border-radius: 8px;
+    padding: 12px 18px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+}
+
+.template-banner .template-icon {
+    font-size: 18px;
+}
+
+.template-banner .template-name {
+    color: var(--primary);
+}
+
+.template-banner .template-count {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
 /* Form styles */
 .form-row {
     display: flex;
@@ -893,15 +929,18 @@ function submitRetestRequest() {
     .then(function(response) { return response.json(); })
     .then(function(data) {
         if (data.success) {
+            // Save button reference before closing modal (closeRetestModal sets it to null)
+            var buttonToReplace = currentRetestButton;
+
             closeRetestModal();
 
             // Replace button with pending badge
-            if (currentRetestButton) {
+            if (buttonToReplace) {
                 var badge = document.createElement('span');
                 badge.className = 'retest-badge';
                 badge.title = 'Retest already requested';
                 badge.textContent = 'Pending';
-                currentRetestButton.parentNode.replaceChild(badge, currentRetestButton);
+                buttonToReplace.parentNode.replaceChild(badge, buttonToReplace);
 
                 // Add visual indicator to the row
                 var row = badge.closest('tr');

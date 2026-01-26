@@ -43,7 +43,7 @@ except ImportError:
     VersionsResult = None
 
 # API-loaded versions list (populated from API when available)
-# Format matches the VERSIONS list: list of dicts with id, packages, steam_date, steam_time, skip_tests
+# Format: list of dicts with id, packages, steam_date, steam_time (skip_tests deprecated, use templates)
 API_VERSIONS = None  # None means not loaded; empty list means loaded but empty
 
 
@@ -965,11 +965,19 @@ class VersionPage(QWidget):
 
         for v in get_active_versions():
             vid = v['id']
-            # Calculate completion percentage
-            skip = set(v.get('skip_tests', []))
-            total_tests = len([t for t in TESTS if t[0] not in skip])
+            # Calculate completion percentage using template-filtered tests
+            # Try to get version-specific tests from API/cache
+            version_tests, _ = self.controller.get_tests_for_version(vid)
+            if version_tests:
+                # Use template-filtered tests
+                test_keys = set(t[0] for t in version_tests)
+                total_tests = len(version_tests)
+            else:
+                # Fall back to all tests if API not available
+                test_keys = set(t[0] for t in TESTS)
+                total_tests = len(TESTS)
             saved_results = self.controller.session.get('results', {}).get(vid, {})
-            completed_tests = sum(1 for t in TESTS if t[0] not in skip and saved_results.get(t[0], {}).get('status', ''))
+            completed_tests = sum(1 for tk in test_keys if saved_results.get(tk, {}).get('status', ''))
             pct = int((completed_tests / total_tests * 100)) if total_tests > 0 else 0
 
             # Build display text with percentage
@@ -1592,20 +1600,17 @@ class TestPage(QWidget):
         self.current_test_index = 0  # Reset current test index
 
         # Try to get version-specific tests from API (uses version-specific template if assigned)
-        version_tests, api_skip_tests = self.controller.get_tests_for_version(version['id'])
+        # Templates replace skip_tests - the returned tests list is already filtered
+        version_tests, _ = self.controller.get_tests_for_version(version['id'])
         if version_tests is not None:
-            # Use version-specific tests from API
+            # Use version-specific tests from API (already template-filtered)
             tests_to_show = version_tests
-            # Use skip_tests from API (synced with admin_versions settings)
-            skip = api_skip_tests if api_skip_tests else set()
         else:
-            # Fall back to global TESTS with skip_tests filtering from local version data
+            # Fall back to global TESTS if API not available
             tests_to_show = TESTS
-            skip = set(version.get('skip_tests', []))
 
         for tnum, tname, tdesc in tests_to_show:
-            if tnum in skip:
-                continue
+            # Tests are already filtered by template - no skip check needed
             frame = QFrame()
             fl = QHBoxLayout()
 
@@ -2161,15 +2166,15 @@ class Controller:
     def get_tests_for_version(self, version_id: str):
         """Get tests for a specific version using version-specific template if assigned.
 
-        Uses cached data when offline if available.
+        Uses cached data when offline if available. Templates now replace skip_tests entirely.
 
         Args:
             version_id: The client version string (e.g., 'secondblob.bin.2004-01-15')
 
         Returns:
-            Tuple of (tests_list, skip_tests_set) or (None, None) if not available
+            Tuple of (tests_list, None) or (None, None) if not available
             - tests_list: List of tests in (test_key, test_name, description) format
-            - skip_tests_set: Set of test keys to skip (from admin_versions settings)
+            - Second element is always None (skip_tests deprecated, use templates)
         """
         if not self.panel or not self.panel.is_configured:
             return None, None
@@ -2194,12 +2199,9 @@ class Controller:
                 elif is_cached:
                     print(f"Using cached tests for version {version_id} ({len(tests)} tests)")
 
-                # Get skip_tests from the API response (synced with admin_versions settings)
-                skip_tests = set(result.skip_tests) if result.skip_tests else set()
-                if skip_tests:
-                    print(f"  Skip tests from version settings: {', '.join(sorted(skip_tests))}")
-
-                return tests, skip_tests
+                # skip_tests is deprecated - templates now control test visibility
+                # Return None for skip_tests for backward compatibility
+                return tests, None
             return None, None
         except Exception as e:
             print(f"Error getting tests for version {version_id}: {e}")
@@ -2229,7 +2231,7 @@ class Controller:
                         'packages': v.packages or [],
                         'steam_date': v.steam_date,
                         'steam_time': v.steam_time,
-                        'skip_tests': v.skip_tests or [],
+                        'skip_tests': [],  # Deprecated: templates control test visibility
                         'display_name': v.display_name,
                         'notifications': []
                     }
@@ -2708,9 +2710,38 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
             return re.sub(r'[^a-zA-Z0-9_-]+', '-', str(value)).strip('-').lower()
 
         # build summary matrix chart (placed above version details)
-        # columns: all tests in TESTS order; rows: tested versions (same order)
-        test_cols = [t[0] for t in TESTS]
-        test_names = {t[0]: t[1] for t in TESTS}
+        # columns: union of tests across all tested versions (respects templates)
+        # rows: tested versions (same order)
+
+        # Collect tests for each version and build union for matrix columns
+        version_tests_cache = {}  # vid -> list of (test_key, name, desc)
+        all_test_keys_ordered = []  # maintains order of first appearance
+        all_test_names = {}
+
+        for v in get_active_versions():
+            vid = v['id']
+            if vid not in tested_ids:
+                continue
+
+            # Try to get version-specific tests from API/cache (template-filtered)
+            version_tests, _ = self.get_tests_for_version(vid)
+            if version_tests:
+                version_tests_cache[vid] = version_tests
+                for tk, tn, td in version_tests:
+                    if tk not in all_test_names:
+                        all_test_keys_ordered.append(tk)
+                        all_test_names[tk] = tn
+            else:
+                # Fallback to global TESTS
+                version_tests_cache[vid] = TESTS
+                for tk, tn, td in TESTS:
+                    if tk not in all_test_names:
+                        all_test_keys_ordered.append(tk)
+                        all_test_names[tk] = tn
+
+        # Use ordered union for matrix columns, fallback to TESTS if empty
+        test_cols = all_test_keys_ordered if all_test_keys_ordered else [t[0] for t in TESTS]
+        test_names = all_test_names if all_test_names else {t[0]: t[1] for t in TESTS}
 
         # color mapping
         color_map = {
@@ -2735,14 +2766,16 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
             vid = v['id']
             if vid not in tested_ids:
                 continue
-            skip = set(v.get('skip_tests', []))
             packages = v.get('packages', [])
             row_label = ', '.join(packages) if packages else vid
             ver_anchor = anchor_id(vid)
             row = [f'<td class="row-label">{html_lib.escape(row_label)}</td>']
             saved = results.get(vid, {})
+            # Get tests applicable to this version (from template)
+            version_test_keys = set(t[0] for t in version_tests_cache.get(vid, TESTS))
             for tc in test_cols:
-                if tc in skip:
+                # Treat tests not in version's template as skipped
+                if tc not in version_test_keys:
                     color = color_map.get('SKIP')
                     cell = f'<td class="cell" style="background:{color};"></td>'
                 else:
@@ -2784,7 +2817,6 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
             vid = v['id']
             if vid not in tested_ids:
                 continue
-            skip = set(v.get('skip_tests', []))
             # time for this version
             sec = int(timing.get(vid, 0))
             if running_vid == vid:
@@ -2796,9 +2828,10 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
             html.append('<table>')
             html.append('<tr><th>Test #</th><th>Test</th><th>Expected</th><th>Status</th><th>Notes</th></tr>')
             saved = results.get(vid, {})
-            for tnum, tname, texp in TESTS:
-                if tnum in skip:
-                    continue
+            # Use version-specific tests from cache (respects templates)
+            version_test_list = version_tests_cache.get(vid, TESTS)
+            for tnum, tname, texp in version_test_list:
+                # Tests are already filtered by template - no skip check needed
                 r = saved.get(tnum, {})
                 status = r.get('status', '')
                 raw_notes = r.get('notes', '') or ''

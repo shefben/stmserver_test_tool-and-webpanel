@@ -264,6 +264,18 @@ function parseTestToolJson($data) {
         $steamuiVersion = $versionPkgInfo['steamui_version'] ?? $meta['steamui_version'] ?? null;
         $steamPkgVersion = $versionPkgInfo['steam_pkg_version'] ?? $meta['steam_pkg_version'] ?? null;
 
+        // Strip prefixes like 'steam_' or 'steamui_' and extract only numeric part
+        if ($steamuiVersion) {
+            $steamuiVersion = preg_replace('/^(steamui_?|steam_?)/i', '', $steamuiVersion);
+            $steamuiVersion = preg_replace('/[^0-9]/', '', $steamuiVersion);
+            $steamuiVersion = $steamuiVersion ?: null;
+        }
+        if ($steamPkgVersion) {
+            $steamPkgVersion = preg_replace('/^(steam_?|steamui_?)/i', '', $steamPkgVersion);
+            $steamPkgVersion = preg_replace('/[^0-9]/', '', $steamPkgVersion);
+            $steamPkgVersion = $steamPkgVersion ?: null;
+        }
+
         $allReports[] = [
             'tester' => $meta['tester'] ?? 'Unknown',
             'commit_hash' => $meta['commit'] ?? '',

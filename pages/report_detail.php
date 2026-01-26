@@ -36,8 +36,12 @@ $revisionCount = $report['revision_count'] ?? 0;
 // Get attached logs
 $attachedLogs = $db->getReportLogs($reportId);
 
-// Organize by category
-$categories = getTestCategories();
+// Get categories filtered by template for this version
+$templateData = $db->getVisibleTestsForVersion($report['client_version'], true);
+$categories = $templateData['categories'];
+$appliedTemplate = $templateData['template'];
+
+// Organize results by key
 $resultsByKey = [];
 foreach ($testResults as $result) {
     $resultsByKey[$result['test_key']] = $result;
@@ -74,6 +78,9 @@ $versionNotifications = $db->getNotificationsForVersionString(
                 <span class="revision-indicator" title="This report has <?= $revisionCount ?> previous revision(s)">
                     v<?= $revisionCount + 1 ?>
                 </span>
+            <?php endif; ?>
+            <?php if ($appliedTemplate && !$appliedTemplate['is_default']): ?>
+                <span class="template-badge" title="Tests filtered by template">📋 <?= e($appliedTemplate['name']) ?></span>
             <?php endif; ?>
         </h1>
         <p style="color: var(--text-muted);">
@@ -552,6 +559,20 @@ $isUserAdmin = isAdmin();
 
 <style>
 .hidden { display: none; }
+
+/* Template badge in header */
+.template-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, rgba(126, 166, 75, 0.2) 0%, rgba(126, 166, 75, 0.1) 100%);
+    border: 1px solid rgba(126, 166, 75, 0.4);
+    color: var(--primary);
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: normal;
+    margin-left: 10px;
+    vertical-align: middle;
+}
 
 /* Version Notifications Section */
 .version-notifications-section {
@@ -1529,16 +1550,19 @@ function submitRetestRequest() {
     .then(function(response) { return response.json(); })
     .then(function(data) {
         if (data.success) {
+            // Save button reference before closing modal (closeRetestModal sets it to null)
+            var buttonToReplace = currentRetestButton;
+
             // Close modal
             closeRetestModal();
 
             // Replace button with pending badge
-            if (currentRetestButton) {
+            if (buttonToReplace) {
                 var badge = document.createElement('span');
                 badge.className = 'retest-badge';
                 badge.title = 'Retest already requested';
                 badge.textContent = 'Pending';
-                currentRetestButton.parentNode.replaceChild(badge, currentRetestButton);
+                buttonToReplace.parentNode.replaceChild(badge, buttonToReplace);
 
                 // Add visual indicator to the row
                 var row = badge.closest('tr');
@@ -2603,39 +2627,39 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
 
 <!-- Test Detail Modal -->
-<div id="test-detail-modal" class="test-detail-overlay" style="display: none;">
-    <div class="test-detail-modal">
-        <div class="test-detail-header">
+<div id="test-detail-modal" class="report-test-detail-overlay" style="display: none;">
+    <div class="report-test-detail-box">
+        <div class="report-test-detail-header">
             <h3 id="test-detail-title">Test Details</h3>
-            <button type="button" class="test-detail-close" onclick="closeTestDetailModal()">&times;</button>
+            <button type="button" class="report-test-detail-close" onclick="closeTestDetailModal()">&times;</button>
         </div>
-        <div class="test-detail-body">
-            <div class="test-detail-section">
+        <div class="report-test-detail-body">
+            <div class="report-test-detail-section">
                 <label>Test Key</label>
-                <div class="test-detail-value" id="test-detail-key"></div>
+                <div class="report-test-detail-value" id="test-detail-key"></div>
             </div>
-            <div class="test-detail-section">
+            <div class="report-test-detail-section">
                 <label>Category</label>
-                <div class="test-detail-value" id="test-detail-category"></div>
+                <div class="report-test-detail-value" id="test-detail-category"></div>
             </div>
-            <div class="test-detail-section">
+            <div class="report-test-detail-section">
                 <label>Test Name</label>
-                <div class="test-detail-value" id="test-detail-name"></div>
+                <div class="report-test-detail-value" id="test-detail-name"></div>
             </div>
-            <div class="test-detail-section">
+            <div class="report-test-detail-section">
                 <label>Expected Behavior</label>
-                <div class="test-detail-value" id="test-detail-expected"></div>
+                <div class="report-test-detail-value" id="test-detail-expected"></div>
             </div>
-            <div class="test-detail-section">
+            <div class="report-test-detail-section">
                 <label>Status</label>
-                <div class="test-detail-value" id="test-detail-status"></div>
+                <div class="report-test-detail-value" id="test-detail-status"></div>
             </div>
-            <div class="test-detail-section" id="test-detail-notes-section">
+            <div class="report-test-detail-section" id="test-detail-notes-section">
                 <label>Notes</label>
-                <div class="test-detail-value test-detail-notes" id="test-detail-notes"></div>
+                <div class="report-test-detail-value report-test-detail-notes" id="test-detail-notes"></div>
             </div>
         </div>
-        <div class="test-detail-footer">
+        <div class="report-test-detail-footer">
             <a href="#" id="test-detail-filter-link" class="btn btn-sm">View All Results for This Test</a>
             <button type="button" class="btn btn-sm btn-secondary" onclick="closeTestDetailModal()">Close</button>
         </div>
@@ -2643,7 +2667,7 @@ document.addEventListener('DOMContentLoaded', function() {
 </div>
 
 <style>
-.test-detail-overlay {
+.report-test-detail-overlay {
     position: fixed;
     top: 0;
     left: 0;
@@ -2656,7 +2680,7 @@ document.addEventListener('DOMContentLoaded', function() {
     justify-content: center;
 }
 
-.test-detail-modal {
+.report-test-detail-box {
     background: var(--bg-card);
     border-radius: 8px;
     width: 90%;
@@ -2669,10 +2693,10 @@ document.addEventListener('DOMContentLoaded', function() {
     border-bottom: solid 2px #292d23;
     border-left: solid 2px #899281;
     border-right: solid 2px #292d23;
-    animation: testDetailSlideIn 0.2s ease-out;
+    animation: reportTestDetailSlideIn 0.2s ease-out;
 }
 
-@keyframes testDetailSlideIn {
+@keyframes reportTestDetailSlideIn {
     from {
         opacity: 0;
         transform: scale(0.95) translateY(-20px);
@@ -2683,7 +2707,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 }
 
-.test-detail-header {
+.report-test-detail-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -2693,13 +2717,13 @@ document.addEventListener('DOMContentLoaded', function() {
     border-radius: 6px 6px 0 0;
 }
 
-.test-detail-header h3 {
+.report-test-detail-header h3 {
     margin: 0;
     color: var(--primary);
     font-size: 18px;
 }
 
-.test-detail-close {
+.report-test-detail-close {
     background: none;
     border: none;
     color: var(--text-muted);
@@ -2709,25 +2733,25 @@ document.addEventListener('DOMContentLoaded', function() {
     line-height: 1;
 }
 
-.test-detail-close:hover {
+.report-test-detail-close:hover {
     color: #c45050;
 }
 
-.test-detail-body {
+.report-test-detail-body {
     padding: 20px;
     overflow-y: auto;
     flex: 1;
 }
 
-.test-detail-section {
+.report-test-detail-section {
     margin-bottom: 16px;
 }
 
-.test-detail-section:last-child {
+.report-test-detail-section:last-child {
     margin-bottom: 0;
 }
 
-.test-detail-section label {
+.report-test-detail-section label {
     display: block;
     color: var(--text-muted);
     font-size: 12px;
@@ -2736,7 +2760,7 @@ document.addEventListener('DOMContentLoaded', function() {
     margin-bottom: 6px;
 }
 
-.test-detail-value {
+.report-test-detail-value {
     color: var(--text);
     font-size: 15px;
     line-height: 1.5;
@@ -2746,7 +2770,7 @@ document.addEventListener('DOMContentLoaded', function() {
     border: 1px solid var(--border);
 }
 
-.test-detail-notes {
+.report-test-detail-notes {
     white-space: pre-wrap;
     word-wrap: break-word;
     max-height: 200px;
@@ -2755,7 +2779,7 @@ document.addEventListener('DOMContentLoaded', function() {
     font-size: 13px;
 }
 
-.test-detail-footer {
+.report-test-detail-footer {
     padding: 15px 20px;
     border-top: 1px solid var(--border);
     display: flex;

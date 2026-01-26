@@ -2239,6 +2239,15 @@ tr:hover td {
   margin-left: auto;
 }
 
+.github-revision-datetime {
+  font-size: 11px;
+  color: #a0aa95;
+  text-align: center;
+  padding: 2px 0;
+  border-top: 1px solid #3e4637;
+  margin-top: -4px;
+}
+
 .github-download-link {
   display: flex;
   align-items: center;
