@@ -180,6 +180,11 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
+        // Skip if this cell has the has-notes class (results page has its own detail modal)
+        if (cell.classList.contains('has-notes')) {
+            return;
+        }
+
         if (cell.scrollWidth > cell.clientWidth || cell.getAttribute('data-full')) {
             cell.style.cursor = 'pointer';
             cell.title = 'Click to view full notes';
@@ -728,8 +733,15 @@ const RichNotesRenderer = {
     render: function(content) {
         if (!content || content === '-') return content;
 
+        // Convert HTML code blocks to markdown BEFORE escaping
+        // This handles legacy data that may have <pre><code> blocks
+        content = this.convertHtmlCodeBlocksToMarkdown(content);
+
         // Escape HTML first to prevent XSS
         let html = this.escapeHtml(content);
+
+        // Process BBCode tags (must be before markdown processing)
+        html = this.renderBBCode(html);
 
         // Process code blocks first (```language\n...\n```)
         html = this.renderCodeBlocks(html);
@@ -745,6 +757,66 @@ const RichNotesRenderer = {
 
         // Convert newlines to <br> (but not inside <pre> blocks)
         html = this.renderLineBreaks(html);
+
+        return html;
+    },
+
+    /**
+     * Convert HTML <pre><code> blocks to markdown ``` format
+     * This handles legacy data before escaping
+     */
+    convertHtmlCodeBlocksToMarkdown: function(text) {
+        // Match <pre...><code>...</code></pre> patterns
+        return text.replace(/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi, function(match, code) {
+            // Decode HTML entities in the code
+            var temp = document.createElement('div');
+            temp.innerHTML = code;
+            var decoded = temp.textContent || temp.innerText || '';
+            return '```\n' + decoded + '\n```';
+        });
+    },
+
+    /**
+     * Render BBCode tags
+     * Supports: [b], [i], [u], [code], [url], [img]
+     */
+    renderBBCode: function(html) {
+        // Protect existing HTML tags from being replaced
+        const protectedBlocks = [];
+        let protectIndex = 0;
+
+        // [code] blocks - convert to markdown code blocks for later processing
+        html = html.replace(/\[code\]([\s\S]*?)\[\/code\]/gi, function(match, code) {
+            return '```\n' + code + '\n```';
+        });
+
+        // [b] - bold
+        html = html.replace(/\[b\]([\s\S]*?)\[\/b\]/gi, '<strong>$1</strong>');
+
+        // [i] - italic
+        html = html.replace(/\[i\]([\s\S]*?)\[\/i\]/gi, '<em>$1</em>');
+
+        // [u] - underline
+        html = html.replace(/\[u\]([\s\S]*?)\[\/u\]/gi, '<u>$1</u>');
+
+        // [url=...] - link with text
+        html = html.replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, function(match, url, text) {
+            // Unescape the URL (it was escaped earlier)
+            url = url.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+            return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+        });
+
+        // [url] - simple URL
+        html = html.replace(/\[url\]([\s\S]*?)\[\/url\]/gi, function(match, url) {
+            url = url.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+            return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + url + '</a>';
+        });
+
+        // [img] - image
+        html = html.replace(/\[img\]([\s\S]*?)\[\/img\]/gi, function(match, url) {
+            url = url.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+            return '<img src="' + url + '" alt="Image" class="note-image" style="max-width: 100%; height: auto; border-radius: 4px;" />';
+        });
 
         return html;
     },

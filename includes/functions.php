@@ -14,7 +14,7 @@ function getStatusColor($status) {
 // Get status badge HTML
 function getStatusBadge($status) {
     $color = getStatusColor($status);
-    $text = $status ?: 'Unknown';
+    $text = $status ?: 'N/A';
     return "<span class=\"status-badge\" style=\"background-color: {$color}\">{$text}</span>";
 }
 
@@ -52,21 +52,60 @@ function e($string) {
     return htmlspecialchars($string ?? '', ENT_QUOTES, 'UTF-8');
 }
 
+/**
+ * Convert markdown code blocks (```code```) to HTML <pre><code> tags.
+ *
+ * @param string $text Text containing markdown code blocks
+ * @return string Text with code blocks converted to HTML
+ */
+function convertMarkdownCodeBlocksToHtml($text) {
+    // Match ```language\ncode\n``` or ```code``` patterns
+    // Language is optional, handles \r\n line endings
+    $pattern = '/```(\w*)[\r\n]*([\s\S]*?)```/';
+
+    return preg_replace_callback($pattern, function($match) {
+        $lang = $match[1] ?? '';
+        $code = $match[2] ?? '';
+
+        // Skip if the content is empty or just whitespace
+        if (trim($code) === '') {
+            return $match[0];
+        }
+
+        // Trim leading/trailing newlines from code content
+        $code = trim($code, "\r\n");
+
+        // Escape HTML entities in the code
+        $code = htmlspecialchars($code, ENT_QUOTES, 'UTF-8');
+
+        // Build HTML - use data-language attribute for optional language
+        $langAttr = $lang ? ' data-language="' . htmlspecialchars($lang, ENT_QUOTES, 'UTF-8') . '"' : '';
+
+        return '<pre class="code-block"' . $langAttr . '><code>' . $code . '</code></pre>';
+    }, $text);
+}
+
 // Clean notes while preserving markdown-style formatting
 // Handles Qt rich text HTML conversion to plain text/markdown
+// Converts markdown code blocks (```) to HTML <pre><code> tags
 function cleanNotes($notes) {
     if (empty($notes)) return '';
 
     // Check if this already looks like markdown (not HTML)
-    // If it has code blocks, image syntax, etc., preserve it as-is
-    if (preg_match('/```[\s\S]*```/', $notes) ||
-        preg_match('/!\[[^\]]*\]\([^)]+\)/', $notes) ||
-        preg_match('/\[image:data:image\//', $notes) ||
-        preg_match('/\{\{IMAGE:data:image\//', $notes)) {
-        // Already markdown-formatted, just clean up
-        $text = $notes;
-        // Remove Qt rich text CSS that might leak through
-        $text = str_replace('p, li { white-space: pre-wrap; }', '', $text);
+    // Convert markdown code blocks to HTML before further processing
+    $hasMarkdownCodeBlocks = preg_match('/```[\s\S]*?```/', $notes);
+    $hasMarkdownImages = preg_match('/!\[[^\]]*\]\([^)]+\)/', $notes);
+    $hasImageMarkers = preg_match('/\[image:data:image\//', $notes) || preg_match('/\{\{IMAGE:data:image\//', $notes);
+
+    if ($hasMarkdownCodeBlocks || $hasMarkdownImages || $hasImageMarkers) {
+        // Clean up Qt CSS first
+        $text = str_replace('p, li { white-space: pre-wrap; }', '', $notes);
+
+        // Convert markdown code blocks (```) to HTML <pre><code> tags
+        if ($hasMarkdownCodeBlocks) {
+            $text = convertMarkdownCodeBlocksToHtml($text);
+        }
+
         return trim($text);
     }
 
@@ -97,21 +136,23 @@ function cleanNotes($notes) {
         }
     }
 
-    // Convert HTML <pre><code> blocks to markdown code blocks BEFORE stripping tags
-    // This preserves code blocks that were created in the Qt editor
-    $extractedCodeBlocks = [];
+    // Preserve <pre><code> blocks - clean them up and add proper class for styling
+    // Strip syntax highlighting spans from inside but keep the pre/code structure
+    $codeBlocks = [];
     $notes = preg_replace_callback(
         '/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/i',
-        function($match) use (&$extractedCodeBlocks) {
+        function($match) use (&$codeBlocks) {
             // Extract code content from <pre><code> block
             $codeHtml = $match[1];
             // Strip inner HTML tags (like syntax highlighting spans)
             $codeText = strip_tags($codeHtml);
             // Decode HTML entities
             $codeText = html_entity_decode($codeText, ENT_QUOTES, 'UTF-8');
-            // Store placeholder and actual code
-            $placeholder = "__CODE_BLOCK_" . count($extractedCodeBlocks) . "__";
-            $extractedCodeBlocks[] = $codeText;
+            // Re-escape for safe HTML
+            $codeText = htmlspecialchars($codeText, ENT_QUOTES, 'UTF-8');
+            // Store placeholder and the clean code block with proper class
+            $placeholder = "__CODE_BLOCK_" . count($codeBlocks) . "__";
+            $codeBlocks[] = '<pre class="code-block"><code>' . $codeText . '</code></pre>';
             return $placeholder;
         },
         $notes
@@ -126,11 +167,10 @@ function cleanNotes($notes) {
     $text = preg_replace('/\bimage\b\s*/i', '', $text);
     $text = trim($text);
 
-    // Replace code block placeholders with markdown code blocks
-    foreach ($extractedCodeBlocks as $i => $codeText) {
+    // Restore code blocks with proper HTML
+    foreach ($codeBlocks as $i => $block) {
         $placeholder = "__CODE_BLOCK_{$i}__";
-        $markdownBlock = "\n```\n{$codeText}\n```\n";
-        $text = str_replace($placeholder, $markdownBlock, $text);
+        $text = str_replace($placeholder, "\n" . $block . "\n", $text);
     }
 
     // Clean up multiple newlines that may result from replacements
@@ -188,6 +228,78 @@ function shortVersionName($fullVersion) {
     return $fullVersion;
 }
 
+// Clean client version string by removing any trailing commit hash
+// Commit hashes are 7-40 character hexadecimal strings
+function cleanClientVersion($version) {
+    if (empty($version)) return '';
+
+    // Remove trailing commit hash patterns:
+    // - " abc123def" (space followed by 7+ hex chars)
+    // - " [abc123def]" (bracketed hash)
+    // - " (abc123def)" (parenthesized hash)
+    // - "_abc123def" (underscore followed by hash)
+    $cleaned = preg_replace('/[\s_]+[(\[]?[0-9a-fA-F]{7,40}[)\]]?\s*$/', '', $version);
+
+    return trim($cleaned);
+}
+
+// Convert {{IMAGE:data:image/...;base64,...}} markers to inline HTML images for editing
+// Images are wrapped in a span with contenteditable=false so they can be selected and deleted as a unit
+function convertImageMarkersToHtml($text) {
+    if (empty($text)) return '';
+
+    // Escape HTML first to prevent XSS, but we'll handle our image markers specially
+    $escaped = htmlspecialchars($text, ENT_QUOTES, 'UTF-8');
+
+    // Convert escaped image markers back to actual images
+    // Pattern matches: {{IMAGE:data:image/TYPE;base64,DATA}}
+    // After escaping, this becomes: {{IMAGE:data:image/TYPE;base64,DATA}}
+    $pattern = '/\{\{IMAGE:(data:image\/[a-zA-Z]+;base64,[A-Za-z0-9+\/=]+)\}\}/';
+
+    $result = preg_replace_callback($pattern, function($matches) {
+        $dataUri = $matches[1];
+        // Create an inline image that can be selected and deleted
+        // Using a wrapper span with contenteditable=false makes it behave as a single unit
+        return '<span class="inline-image-wrapper" contenteditable="false" data-image-marker="{{IMAGE:' . htmlspecialchars($dataUri, ENT_QUOTES, 'UTF-8') . '}}"><img src="' . htmlspecialchars($dataUri, ENT_QUOTES, 'UTF-8') . '" class="inline-note-image" alt="Embedded image"></span>';
+    }, $escaped);
+
+    // Convert newlines to <br> for proper display
+    $result = nl2br($result);
+
+    return $result;
+}
+
+// Convert HTML content with inline images back to text with {{IMAGE:...}} markers
+// Used when saving contenteditable content back to the database
+function convertHtmlToImageMarkers($html) {
+    if (empty($html)) return '';
+
+    // First, convert <br> tags back to newlines
+    $text = preg_replace('/<br\s*\/?>/i', "\n", $html);
+
+    // Replace inline image wrappers with their original markers
+    // Pattern: <span class="inline-image-wrapper"...data-image-marker="{{IMAGE:...}}">...</span>
+    $text = preg_replace_callback('/<span[^>]*data-image-marker="([^"]+)"[^>]*>.*?<\/span>/s', function($matches) {
+        return html_entity_decode($matches[1], ENT_QUOTES, 'UTF-8');
+    }, $text);
+
+    // Also handle case where just <img> tags with data URIs exist (from paste/drop)
+    $text = preg_replace_callback('/<img[^>]*src="(data:image\/[^"]+)"[^>]*>/i', function($matches) {
+        return '{{IMAGE:' . $matches[1] . '}}';
+    }, $text);
+
+    // Strip any remaining HTML tags
+    $text = strip_tags($text);
+
+    // Decode HTML entities
+    $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
+
+    // Normalize multiple newlines
+    $text = preg_replace('/\n{3,}/', "\n\n", $text);
+
+    return trim($text);
+}
+
 // Parse the raw JSON from test tool - returns ALL versions as an array of reports
 // Handles session_results.json format from the PyQt test tool
 function parseTestToolJson($data) {
@@ -227,6 +339,10 @@ function parseTestToolJson($data) {
     // Get per-version package info (keyed by version ID)
     // This maps version IDs to their Steam/SteamUI package versions
     $versionPackages = $data['version_packages'] ?? [];
+
+    // Get per-version commit hashes (keyed by version ID)
+    // This allows different versions to have been tested against different commits
+    $versionCommits = $data['version_commits'] ?? [];
 
     // Parse ALL versions from results
     $allReports = [];
@@ -276,9 +392,12 @@ function parseTestToolJson($data) {
             $steamPkgVersion = $steamPkgVersion ?: null;
         }
 
+        // Use per-version commit if available, fall back to global meta commit
+        $commitHash = $versionCommits[$clientVersion] ?? $meta['commit'] ?? '';
+
         $allReports[] = [
             'tester' => $meta['tester'] ?? 'Unknown',
-            'commit_hash' => $meta['commit'] ?? '',
+            'commit_hash' => $commitHash,
             'test_type' => $testType,
             'client_version' => $clientVersion,
             'steamui_version' => $steamuiVersion,

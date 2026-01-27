@@ -84,7 +84,7 @@ $versionNotifications = $db->getNotificationsForVersionString(
             <?php endif; ?>
         </h1>
         <p style="color: var(--text-muted);">
-            <?= e($report['client_version']) ?>
+            <?= e(cleanClientVersion($report['client_version'])) ?>
             <?php if (!empty($report['restored_from'])): ?>
                 <span class="restored-badge" title="Restored from revision #<?= $report['restored_from'] ?>">
                     ↺ Restored
@@ -111,7 +111,7 @@ $versionNotifications = $db->getNotificationsForVersionString(
         <label>Client Version</label>
         <div class="value">
             <a href="?page=results&version=<?= urlencode($report['client_version']) ?>" class="meta-link">
-                <?= e($report['client_version']) ?>
+                <?= e(cleanClientVersion($report['client_version'])) ?>
             </a>
         </div>
     </div>
@@ -296,14 +296,14 @@ $versionNotifications = $db->getNotificationsForVersionString(
         Attached Log Files (<?= count($attachedLogs) ?>)
     </h3>
     <div class="table-container">
-        <table class="sortable">
+        <table class="sortable logs-table">
             <thead>
                 <tr>
                     <th>Filename</th>
-                    <th style="width: 160px;">Log Timestamp</th>
-                    <th style="width: 100px;">Original Size</th>
-                    <th style="width: 100px;">Compressed</th>
-                    <th style="width: 100px;">Action</th>
+                    <th>Log Timestamp</th>
+                    <th>Original Size</th>
+                    <th>Compressed</th>
+                    <th>Action</th>
                 </tr>
             </thead>
             <tbody>
@@ -338,15 +338,15 @@ $versionNotifications = $db->getNotificationsForVersionString(
             </a>
         </h3>
         <div class="table-container">
-            <table class="sortable">
+            <table class="sortable test-results-table">
                 <thead>
                     <tr>
-                        <th style="width: 60px;">Key</th>
+                        <th>Key</th>
                         <th>Test Name</th>
-                        <th style="width: 120px;">Status</th>
+                        <th>Status</th>
                         <th>Notes</th>
                         <?php if (isAdmin()): ?>
-                            <th style="width: 100px;">Actions</th>
+                            <th>Actions</th>
                         <?php endif; ?>
                     </tr>
                 </thead>
@@ -391,6 +391,7 @@ $versionNotifications = $db->getNotificationsForVersionString(
                             <td class="notes-cell rich-notes" data-full="<?= e($notes) ?>">
                                 <?php if ($notes): ?>
                                     <div class="notes-content"><?= e($notes) ?></div>
+                                    <span class="notes-read-more">... read more</span>
                                 <?php else: ?>
                                     <span class="notes-empty">-</span>
                                 <?php endif; ?>
@@ -559,6 +560,88 @@ $isUserAdmin = isAdmin();
 
 <style>
 .hidden { display: none; }
+
+/* Consistent table column widths */
+.logs-table,
+.test-results-table {
+    table-layout: fixed;
+    width: 100%;
+}
+
+/* Logs table columns: Filename | Log Timestamp | Original Size | Compressed | Action */
+.logs-table th:nth-child(1),
+.logs-table td:nth-child(1) { width: auto; } /* Filename - flexible */
+.logs-table th:nth-child(2),
+.logs-table td:nth-child(2) { width: 160px; text-align: center; } /* Log Timestamp */
+.logs-table th:nth-child(3),
+.logs-table td:nth-child(3) { width: 110px; text-align: center; } /* Original Size */
+.logs-table th:nth-child(4),
+.logs-table td:nth-child(4) { width: 110px; text-align: center; } /* Compressed */
+.logs-table th:nth-child(5),
+.logs-table td:nth-child(5) { width: 180px; text-align: center; } /* Action */
+
+/* Test results table columns: Key | Test Name | Status | Notes | Actions (admin) */
+.test-results-table th:nth-child(1),
+.test-results-table td:nth-child(1) { width: 70px; text-align: center; } /* Key */
+.test-results-table th:nth-child(2),
+.test-results-table td:nth-child(2) { width: 280px; } /* Test Name */
+.test-results-table th:nth-child(3),
+.test-results-table td:nth-child(3) { width: 120px; text-align: center; } /* Status */
+.test-results-table th:nth-child(4),
+.test-results-table td:nth-child(4) { width: auto; } /* Notes - flexible */
+.test-results-table th:nth-child(5),
+.test-results-table td:nth-child(5) { width: 100px; text-align: center; } /* Actions */
+
+/* Prevent text overflow in fixed-width columns */
+.test-results-table td,
+.logs-table td {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Allow notes column to wrap */
+.test-results-table td:nth-child(4) {
+    overflow: visible;
+    white-space: normal;
+    word-wrap: break-word;
+}
+
+/* Notes cell truncation */
+.notes-cell {
+    position: relative;
+}
+
+.notes-cell .notes-content {
+    max-height: 4.5em; /* Approximately 3 lines */
+    overflow: hidden;
+    line-height: 1.5;
+}
+
+.notes-cell.expanded .notes-content {
+    max-height: none;
+    overflow: visible;
+}
+
+.notes-cell .notes-read-more {
+    display: none;
+    color: #3498db;
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+.notes-cell .notes-read-more:hover {
+    color: #2980b9;
+}
+
+.notes-cell.truncated .notes-read-more {
+    display: inline-block;
+}
+
+.notes-cell.expanded .notes-read-more {
+    display: none;
+}
 
 /* Template badge in header */
 .template-badge {
@@ -1496,7 +1579,38 @@ document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('retest-modal-error').style.display = 'none';
         }
     });
+
 });
+
+function initNotesTruncation() {
+    document.querySelectorAll('.notes-cell .notes-content').forEach(function(content) {
+        // Check if content is truncated (scrollHeight > clientHeight)
+        var cell = content.closest('.notes-cell');
+        if (!cell) return;
+
+        // Skip cells that are already expanded (e.g., rich-notes-rendered)
+        if (cell.classList.contains('expanded')) return;
+
+        // Use setTimeout to ensure rendering is complete
+        setTimeout(function() {
+            if (content.scrollHeight > content.clientHeight) {
+                cell.classList.add('truncated');
+            }
+        }, 0);
+    });
+
+    // Handle read more click
+    document.querySelectorAll('.notes-cell .notes-read-more').forEach(function(readMore) {
+        readMore.addEventListener('click', function(e) {
+            e.stopPropagation();
+            var cell = this.closest('.notes-cell');
+            if (cell) {
+                cell.classList.remove('truncated');
+                cell.classList.add('expanded');
+            }
+        });
+    });
+}
 
 function openRetestModal() {
     document.getElementById('retest-modal-test-key').textContent = currentRetestTestKey;
@@ -2601,28 +2715,21 @@ document.head.appendChild(tagStyle);
 <!-- Rich Notes Initialization -->
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    // Initialize rich notes rendering for notes cells
-    if (typeof RichNotesRenderer !== 'undefined') {
-        // Render all notes with rich content
-        document.querySelectorAll('.notes-cell.rich-notes').forEach(function(cell) {
-            var contentEl = cell.querySelector('.notes-content');
-            if (!contentEl) return;
+    // Note: Rich notes (images) are NOT rendered in table cells - only in modals
+    // This keeps the table clean and readable with truncated text
 
-            var rawContent = cell.getAttribute('data-full') || contentEl.textContent;
+    // Strip image markers from table cell display (but keep raw content in data-full for modal)
+    document.querySelectorAll('.notes-cell.rich-notes .notes-content').forEach(function(contentEl) {
+        var text = contentEl.textContent;
+        // Remove {{IMAGE:...}} markers from display
+        var cleanText = text.replace(/\{\{IMAGE:[^}]+\}\}/g, '').trim();
+        if (cleanText !== text) {
+            contentEl.textContent = cleanText || '(image only)';
+        }
+    });
 
-            // Check if content has rich formatting
-            if (RichNotesRenderer.hasRichContent(rawContent)) {
-                // Render the rich content
-                contentEl.innerHTML = RichNotesRenderer.render(rawContent);
-                cell.classList.add('rich-notes-rendered');
-                cell.classList.add('expanded');
-
-                // Remove the truncation behavior
-                cell.style.cursor = 'auto';
-                cell.removeAttribute('title');
-            }
-        });
-    }
+    // Initialize notes truncation
+    initNotesTruncation();
 });
 </script>
 

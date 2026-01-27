@@ -48,7 +48,7 @@ if (!$allReports || empty($allReports)) {
         'expected' => [
             'metadata' => [
                 'tester_name' => 'string',
-                'commit_hash' => 'string (optional)',
+                'commit_hash' => 'string (required)',
                 'test_type' => 'WAN or LAN'
             ],
             'tests' => [
@@ -61,6 +61,54 @@ if (!$allReports || empty($allReports)) {
     ]);
     exit;
 }
+
+// Filter out reports without commit hash or without any test content
+$validReports = [];
+$rejectedReports = [];
+
+foreach ($allReports as $report) {
+    // Require commit hash
+    if (empty($report['commit_hash'])) {
+        $rejectedReports[] = [
+            'client_version' => $report['client_version'] ?? 'unknown',
+            'reason' => 'Missing commit hash'
+        ];
+        continue;
+    }
+
+    // Check for at least one test with status or notes
+    $hasContent = false;
+    foreach ($report['results'] as $testKey => $result) {
+        $status = trim($result['status'] ?? '');
+        $notes = trim($result['notes'] ?? '');
+        if ($status || $notes) {
+            $hasContent = true;
+            break;
+        }
+    }
+
+    if (!$hasContent) {
+        $rejectedReports[] = [
+            'client_version' => $report['client_version'] ?? 'unknown',
+            'reason' => 'No test results or notes'
+        ];
+        continue;
+    }
+
+    $validReports[] = $report;
+}
+
+// If all reports were rejected, return error
+if (empty($validReports)) {
+    http_response_code(400);
+    echo json_encode([
+        'error' => 'All reports were rejected',
+        'rejected' => $rejectedReports
+    ]);
+    exit;
+}
+
+$allReports = $validReports;
 
 // Initialize database
 $db = Database::getInstance();
@@ -161,12 +209,22 @@ foreach ($allReports as $parsed) {
             error_log("Regression detection error: " . $e->getMessage());
         }
 
+        // Complete any pending retest requests for this client version and commit hash
+        $retestsCompleted = 0;
+        if (!empty($parsed['commit_hash'])) {
+            $retestsCompleted = $db->completeRetestRequestsByCommit(
+                $parsed['client_version'],
+                $parsed['commit_hash']
+            );
+        }
+
         $insertedReports[] = [
             'report_id' => $reportId,
             'client_version' => $parsed['client_version'],
             'tests_recorded' => $insertedCount,
             'logs_attached' => $logsCount,
             'regressions_detected' => $regressionsDetected,
+            'retests_completed' => $retestsCompleted,
             'content_hash' => $contentHash,
             'view_url' => getBaseUrl() . '/?page=report_detail&id=' . $reportId
         ];

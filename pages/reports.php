@@ -216,12 +216,12 @@ if (!empty($reportIds)) {
                                     <a href="?page=report_detail&id=<?= $report['id'] ?>" class="report-id-link" onclick="event.stopPropagation();">
                                         #<?= $report['id'] ?>
                                     </a>
-                                    <?php if (($report['revision_count'] ?? 0) > 0): ?>
-                                        <a href="?page=report_revisions&id=<?= $report['id'] ?>" class="revision-badge-small" onclick="event.stopPropagation();" title="<?= $report['revision_count'] ?> revision(s)">
-                                            v<?= ($report['revision_count'] ?? 0) + 1 ?>
-                                        </a>
-                                    <?php endif; ?>
                                 </div>
+                                <?php if (($report['revision_count'] ?? 0) > 0): ?>
+                                    <a href="?page=report_revisions&id=<?= $report['id'] ?>" class="revision-badge-small revision-below" onclick="event.stopPropagation();" title="<?= $report['revision_count'] ?> revision(s)">
+                                        v<?= ($report['revision_count'] ?? 0) + 1 ?>
+                                    </a>
+                                <?php endif; ?>
                                 <?php if (!empty($tags)): ?>
                                     <div class="report-tags-inline">
                                         <?php foreach ($tags as $tag): ?>
@@ -517,6 +517,15 @@ if (!empty($reportIds)) {
 }
 .revision-badge-small:hover {
     background: var(--primary-dark, #c0392b);
+}
+
+/* Revision badge displayed below ID */
+.revision-badge-small.revision-below {
+    display: block;
+    margin-left: 0;
+    margin-top: 4px;
+    text-align: center;
+    width: fit-content;
 }
 
 /* Revision link in column */

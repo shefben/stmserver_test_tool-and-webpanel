@@ -30,6 +30,8 @@ import gzip
 import base64
 import threading
 import logging
+import re
+import html as html_lib
 from pathlib import Path
 from typing import Optional, Callable, List, Dict, Any, Union
 from dataclasses import dataclass, field
@@ -47,6 +49,251 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('TestPanelClient')
+
+
+def convert_html_code_blocks_to_markdown(text: str) -> str:
+    """
+    Convert HTML <pre><code> blocks back to markdown ``` format.
+
+    This reverses the conversion done by convert_markdown_code_blocks_to_html.
+    Handles both <pre class="code-block"> and plain <pre><code> formats.
+
+    Args:
+        text: Text containing HTML code blocks
+
+    Returns:
+        Text with HTML code blocks converted to markdown
+    """
+    def replace_code_block(match):
+        # Get the language from data-language attribute if present
+        pre_tag = match.group(1)
+        code_content = match.group(2)
+
+        # Extract language from data-language attribute
+        lang_match = re.search(r'data-language=["\'](\w+)["\']', pre_tag)
+        lang = lang_match.group(1) if lang_match else ''
+
+        # Unescape HTML entities in code
+        code_content = html_lib.unescape(code_content)
+
+        # Build markdown code block
+        return f'```{lang}\n{code_content}\n```'
+
+    # Match <pre ...><code>...</code></pre> patterns
+    # Group 1: the opening pre tag (to extract attributes)
+    # Group 2: the code content
+    pattern = r'<pre([^>]*)>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>'
+    return re.sub(pattern, replace_code_block, text, flags=re.IGNORECASE)
+
+
+def convert_markdown_code_blocks_to_html(text: str) -> str:
+    """
+    Convert markdown code blocks (```code```) to HTML <pre><code> tags.
+
+    Supports:
+    - ```language\\ncode\\n``` (with language specifier)
+    - ```\\ncode\\n``` (no language)
+    - ```code``` (inline on same line)
+
+    Args:
+        text: Text containing markdown code blocks
+
+    Returns:
+        Text with code blocks converted to HTML
+    """
+    # Match ```language\ncode\n``` or ```code``` patterns
+    # Language is optional, handles \r\n line endings
+    def replace_code_block(match):
+        lang = match.group(1) or ''
+        code = match.group(2)
+        # Skip if the content is empty or just whitespace
+        if not code.strip():
+            return match.group(0)
+        # Trim leading/trailing newlines from code content
+        code = code.strip('\r\n')
+        # Escape HTML entities in the code
+        code = html_lib.escape(code)
+        # Build HTML - use data-language attribute for optional language
+        lang_attr = f' data-language="{html_lib.escape(lang)}"' if lang else ''
+        return f'<pre class="code-block"{lang_attr}><code>{code}</code></pre>'
+
+    # Match triple backticks with optional language specifier
+    # Pattern: ```lang\ncode\n``` or ```code```
+    code_block_pattern = r'```(\w*)[\r\n]*([\s\S]*?)```'
+    return re.sub(code_block_pattern, replace_code_block, text)
+
+
+def clean_notes_for_api(notes: str) -> str:
+    """
+    Clean notes for API submission by stripping HTML but preserving images.
+
+    This function:
+    - Strips all HTML tags except embedded images
+    - Keeps markdown code blocks (```) as-is (NOT converted to HTML)
+    - Converts HTML code blocks to markdown format
+    - Detects Qt-styled code blocks and converts to markdown
+    - Decodes HTML entities
+
+    Args:
+        notes: Raw notes string, possibly containing Qt HTML or markdown
+
+    Returns:
+        Cleaned notes string with images preserved and code blocks in markdown format
+    """
+    if not notes:
+        return ''
+
+    # Check if this already looks like markdown (not HTML)
+    has_markdown_code_blocks = re.search(r'```[\s\S]*?```', notes)
+    has_markdown_images = re.search(r'!\[[^\]]*\]\([^)]+\)', notes)
+    has_image_markers = re.search(r'\[image:data:image/', notes) or re.search(r'\{\{IMAGE:data:image/', notes)
+
+    if has_markdown_code_blocks or has_markdown_images or has_image_markers:
+        # Clean up Qt CSS first
+        text = notes.replace('p, li { white-space: pre-wrap; }', '')
+
+        # Keep markdown code blocks as-is - do NOT convert to HTML
+        # The web panel's JavaScript renderer will handle markdown -> HTML conversion
+
+        return text.strip()
+
+    # Extract embedded images from Qt HTML before stripping tags
+    # Qt sends images as: <a href="data:image/png;base64,..."><img src="..."/></a>
+    extracted_images = []
+    seen_images = set()
+
+    # Match anchor tags with data:image hrefs (Qt format) - prefer href as it's the full image
+    for match in re.finditer(r'<a\s+[^>]*href=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>', notes, re.IGNORECASE):
+        img_data = match.group(1)
+        if img_data not in seen_images:
+            extracted_images.append(img_data)
+            seen_images.add(img_data)
+
+    # Also match img tags with data URIs (only add if not already seen from anchor)
+    for match in re.finditer(r'<img\s+[^>]*src=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>', notes, re.IGNORECASE):
+        img_data = match.group(1)
+        if img_data not in seen_images:
+            extracted_images.append(img_data)
+            seen_images.add(img_data)
+
+    # IMPORTANT: Qt's toHtml() does NOT preserve <pre><code> tags!
+    # We use unique text markers (⟦CODE⟧ and ⟦/CODE⟧) that Qt preserves as text.
+    # These markers let us identify code blocks even after Qt transforms the HTML.
+    # Convert these to markdown format for consistent storage.
+    code_blocks = []
+    CODE_MARKER_START = "⟦CODE⟧"
+    CODE_MARKER_END = "⟦/CODE⟧"
+
+    def extract_marked_code_block(match):
+        """Extract code text from marker-delimited code block and convert to markdown."""
+        code_html = match.group(1)
+        # Convert HTML line breaks to newlines BEFORE stripping tags
+        code_html = re.sub(r'<br\s*/?>', '\n', code_html, flags=re.IGNORECASE)
+        # Convert paragraph/div endings to newlines
+        code_html = re.sub(r'</p>\s*<p[^>]*>', '\n', code_html, flags=re.IGNORECASE)
+        code_html = re.sub(r'</div>\s*<div[^>]*>', '\n', code_html, flags=re.IGNORECASE)
+        # Add space between adjacent HTML elements to preserve word spacing
+        code_html = re.sub(r'>\s*<', '> <', code_html)
+        # Strip all HTML tags to get plain text
+        code_text = re.sub(r'<[^>]+>', '', code_html)
+        # Decode HTML entities (also converts &nbsp; to space)
+        code_text = html_lib.unescape(code_text)
+        # Don't re-escape - store as plain text in markdown format
+
+        # Save and return placeholder (using markdown format now)
+        placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
+        code_blocks.append(f'```\n{code_text}\n```')
+        return placeholder
+
+    # Match code blocks by our unique markers (these survive Qt's HTML transformation)
+    notes = re.sub(
+        re.escape(CODE_MARKER_START) + r'([\s\S]*?)' + re.escape(CODE_MARKER_END),
+        extract_marked_code_block,
+        notes
+    )
+
+    # Also check for explicit <pre><code> blocks (in case they come from other sources)
+    # Convert these to markdown format
+    def clean_explicit_code_block(match):
+        pre_tag = match.group(1)
+        code_html = match.group(2)
+        # Convert HTML line breaks to newlines BEFORE stripping tags
+        code_html = re.sub(r'<br\s*/?>', '\n', code_html, flags=re.IGNORECASE)
+        # Convert paragraph/div endings to newlines
+        code_html = re.sub(r'</p>\s*<p[^>]*>', '\n', code_html, flags=re.IGNORECASE)
+        code_html = re.sub(r'</div>\s*<div[^>]*>', '\n', code_html, flags=re.IGNORECASE)
+        # Add space between adjacent HTML elements to preserve word spacing
+        code_html = re.sub(r'>\s*<', '> <', code_html)
+        code_text = re.sub(r'<[^>]+>', '', code_html)
+        code_text = html_lib.unescape(code_text)
+
+        # Extract language from data-language attribute if present
+        lang_match = re.search(r'data-language=["\'](\w+)["\']', pre_tag)
+        lang = lang_match.group(1) if lang_match else ''
+
+        placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
+        code_blocks.append(f'```{lang}\n{code_text}\n```')
+        return placeholder
+
+    notes = re.sub(
+        r'<pre([^>]*)>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>',
+        clean_explicit_code_block,
+        notes,
+        flags=re.IGNORECASE
+    )
+
+    # Strip other HTML tags (code blocks are already protected as placeholders)
+    text = re.sub(r'<[^>]+>', '', notes)
+    # Decode HTML entities
+    text = html_lib.unescape(text)
+    # Remove Qt rich text CSS
+    text = text.replace('p, li { white-space: pre-wrap; }', '')
+    # Clean up "image" link text that Qt leaves behind
+    text = re.sub(r'\bimage\b\s*', '', text, flags=re.IGNORECASE)
+    text = text.strip()
+
+    # Restore code blocks (now in markdown format)
+    for i, block in enumerate(code_blocks):
+        placeholder = f"__CODE_BLOCK_{i}__"
+        text = text.replace(placeholder, f"\n\n{block}\n\n")
+
+    # Clean up multiple newlines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = text.strip()
+
+    # Append extracted images in a format the renderer understands
+    if extracted_images:
+        for data_uri in extracted_images:
+            text += "\n\n{{IMAGE:" + data_uri + "}}"
+        text = text.strip()
+
+    return text
+
+
+def prepare_data_for_api(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Prepare session data for API submission by cleaning notes.
+
+    This creates a copy of the data with HTML stripped from notes,
+    preserving only images and converting code blocks to markdown.
+
+    Args:
+        data: The session data dict with results
+
+    Returns:
+        A copy of data with cleaned notes
+    """
+    import copy
+    cleaned_data = copy.deepcopy(data)
+
+    if 'results' in cleaned_data:
+        for version_id, version_results in cleaned_data['results'].items():
+            if isinstance(version_results, dict):
+                for test_key, test_data in version_results.items():
+                    if isinstance(test_data, dict) and 'notes' in test_data:
+                        test_data['notes'] = clean_notes_for_api(test_data['notes'])
+
+    return cleaned_data
 
 
 @dataclass
@@ -214,11 +461,12 @@ class RetestItem:
     client_version: str
     reason: str
     latest_revision: bool
-    commit_hash: Optional[str] = None
+    commit_hash: Optional[str] = None  # Fix commit (for 'fixed' type)
     created_at: Optional[str] = None
     notes: Optional[str] = None  # Admin notes explaining what to retest
     report_id: Optional[int] = None  # Associated report ID
     report_revision: Optional[int] = None  # Report revision when retest was requested
+    tested_commit_hash: Optional[str] = None  # Commit hash the test was originally submitted against
 
     @classmethod
     def from_dict(cls, data: dict) -> 'RetestItem':
@@ -234,7 +482,8 @@ class RetestItem:
             created_at=data.get('created_at'),
             notes=data.get('notes'),
             report_id=data.get('report_id'),
-            report_revision=data.get('report_revision')
+            report_revision=data.get('report_revision'),
+            tested_commit_hash=data.get('tested_commit_hash')
         )
 
 
@@ -883,6 +1132,10 @@ class TestPanelClient:
         except IOError as e:
             return SubmitResult(success=False, error=f"Could not read file: {e}")
 
+        # Clean HTML from notes before API submission
+        # This strips HTML but preserves embedded images and code blocks
+        data = prepare_data_for_api(data)
+
         if verbose:
             logger.info(f"Loaded report file: {file_path}")
             if 'meta' in data:
@@ -968,6 +1221,9 @@ class TestPanelClient:
         Returns:
             SubmitResult with submission details
         """
+        # Clean HTML from notes before API submission
+        data = prepare_data_for_api(data)
+
         try:
             response = self._make_request('POST', '/api/submit.php', data=data)
 
@@ -1153,6 +1409,61 @@ class TestPanelClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching retest queue: {e}")
             return []
+
+    def check_flags(self) -> dict:
+        """
+        Lightweight flag check for polling - checks for unacknowledged flags.
+
+        This is a low-overhead call designed for periodic background polling.
+
+        Returns:
+            Dict with 'success', 'count', and 'flags' keys
+        """
+        try:
+            response = self._make_request('GET', '/api/flag_check.php')
+
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('success'):
+                    return {
+                        'success': True,
+                        'count': data.get('count', 0),
+                        'flags': data.get('flags', [])
+                    }
+                return {'success': False, 'count': 0, 'flags': [], 'error': data.get('error', 'Unknown error')}
+
+            return {'success': False, 'count': 0, 'flags': [], 'error': f'HTTP {response.status_code}'}
+
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Flag check failed (offline?): {e}")
+            return {'success': False, 'count': 0, 'flags': [], 'error': str(e)}
+
+    def acknowledge_flag(self, flag_type: str, flag_id: int) -> bool:
+        """
+        Acknowledge a flag notification so it won't show again.
+
+        Args:
+            flag_type: 'retest' or 'fixed'
+            flag_id: The flag's ID
+
+        Returns:
+            True if acknowledged successfully
+        """
+        try:
+            response = self._make_request('POST', '/api/flag_check.php', data={
+                'type': flag_type,
+                'id': flag_id
+            })
+
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('success', False)
+
+            return False
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error acknowledging flag: {e}")
+            return False
 
     def get_tests(self, enabled_only: bool = True, client_version: Optional[str] = None,
                   use_cache: bool = True) -> TestsResult:

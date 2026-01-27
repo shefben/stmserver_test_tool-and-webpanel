@@ -98,27 +98,62 @@ class Database {
     /**
      * Find existing report for same tester+version+test_type+commit_hash
      * Different commit hashes are treated as separate reports
+     * Archived reports are excluded - new submissions will create new reports
      */
     private function findExistingReport($tester, $clientVersion, $testType, $commitHash = null) {
+        // Check if is_archived column exists (for backward compatibility)
+        $hasArchivedColumn = $this->hasColumn('reports', 'is_archived');
+
         // If commit_hash is provided, include it in the lookup
         // This ensures different commits are treated as separate reports
         if ($commitHash !== null && $commitHash !== '') {
-            $stmt = $this->pdo->prepare("
-                SELECT * FROM reports
-                WHERE tester = ? AND client_version = ? AND test_type = ? AND commit_hash = ?
-                LIMIT 1
-            ");
+            if ($hasArchivedColumn) {
+                $stmt = $this->pdo->prepare("
+                    SELECT * FROM reports
+                    WHERE tester = ? AND client_version = ? AND test_type = ? AND commit_hash = ?
+                    AND (is_archived = 0 OR is_archived IS NULL)
+                    LIMIT 1
+                ");
+            } else {
+                $stmt = $this->pdo->prepare("
+                    SELECT * FROM reports
+                    WHERE tester = ? AND client_version = ? AND test_type = ? AND commit_hash = ?
+                    LIMIT 1
+                ");
+            }
             $stmt->execute([$tester, $clientVersion, $testType, $commitHash]);
         } else {
             // No commit hash - find any report without a commit hash
-            $stmt = $this->pdo->prepare("
-                SELECT * FROM reports
-                WHERE tester = ? AND client_version = ? AND test_type = ? AND (commit_hash IS NULL OR commit_hash = '')
-                LIMIT 1
-            ");
+            if ($hasArchivedColumn) {
+                $stmt = $this->pdo->prepare("
+                    SELECT * FROM reports
+                    WHERE tester = ? AND client_version = ? AND test_type = ? AND (commit_hash IS NULL OR commit_hash = '')
+                    AND (is_archived = 0 OR is_archived IS NULL)
+                    LIMIT 1
+                ");
+            } else {
+                $stmt = $this->pdo->prepare("
+                    SELECT * FROM reports
+                    WHERE tester = ? AND client_version = ? AND test_type = ? AND (commit_hash IS NULL OR commit_hash = '')
+                    LIMIT 1
+                ");
+            }
             $stmt->execute([$tester, $clientVersion, $testType]);
         }
         return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Check if a column exists in a table
+     */
+    private function hasColumn($table, $column) {
+        try {
+            $stmt = $this->pdo->prepare("SHOW COLUMNS FROM `$table` LIKE ?");
+            $stmt->execute([$column]);
+            return $stmt->fetch() !== false;
+        } catch (Exception $e) {
+            return false;
+        }
     }
 
     /**
@@ -623,6 +658,62 @@ class Database {
     }
 
     /**
+     * Archive a report - prevents future revisions from being added
+     * New submissions with same criteria will create new reports instead
+     */
+    public function archiveReport($id) {
+        // Ensure the column exists
+        if (!$this->hasColumn('reports', 'is_archived')) {
+            $this->ensureArchivedColumns();
+        }
+
+        $stmt = $this->pdo->prepare("UPDATE reports SET is_archived = 1, archived_at = NOW() WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Unarchive a report - allows revisions to be added again
+     */
+    public function unarchiveReport($id) {
+        if (!$this->hasColumn('reports', 'is_archived')) {
+            return false;
+        }
+
+        $stmt = $this->pdo->prepare("UPDATE reports SET is_archived = 0, archived_at = NULL WHERE id = ?");
+        return $stmt->execute([$id]);
+    }
+
+    /**
+     * Check if a report is archived
+     */
+    public function isReportArchived($id) {
+        if (!$this->hasColumn('reports', 'is_archived')) {
+            return false;
+        }
+
+        $stmt = $this->pdo->prepare("SELECT is_archived FROM reports WHERE id = ?");
+        $stmt->execute([$id]);
+        $result = $stmt->fetch();
+        return $result && $result['is_archived'];
+    }
+
+    /**
+     * Ensure is_archived and archived_at columns exist (auto-migration)
+     */
+    private function ensureArchivedColumns() {
+        try {
+            if (!$this->hasColumn('reports', 'is_archived')) {
+                $this->pdo->exec("ALTER TABLE reports ADD COLUMN is_archived TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Archived reports do not receive new revisions'");
+            }
+            if (!$this->hasColumn('reports', 'archived_at')) {
+                $this->pdo->exec("ALTER TABLE reports ADD COLUMN archived_at DATETIME DEFAULT NULL COMMENT 'When the report was archived'");
+            }
+        } catch (Exception $e) {
+            // Ignore errors if columns already exist
+        }
+    }
+
+    /**
      * Get filtered test results with report info
      */
     public function getFilteredResults($status = '', $version = '', $testKey = '', $tester = '', $reportId = 0, $commitHash = '') {
@@ -982,11 +1073,19 @@ class Database {
      * Get pending retest requests for a specific client/user (for API)
      */
     public function getPendingRetestsForClient($clientVersion = null) {
+        // Join with reports table to get the tested commit hash
+        $sql = "
+            SELECT rr.*, r.commit_hash as tested_commit_hash
+            FROM retest_requests rr
+            LEFT JOIN reports r ON rr.report_id = r.id
+            WHERE rr.status = 'pending'
+        ";
         if ($clientVersion) {
-            $stmt = $this->pdo->prepare("SELECT * FROM retest_requests WHERE status = 'pending' AND client_version = ?");
+            $sql .= " AND rr.client_version = ?";
+            $stmt = $this->pdo->prepare($sql);
             $stmt->execute([$clientVersion]);
         } else {
-            $stmt = $this->pdo->query("SELECT * FROM retest_requests WHERE status = 'pending'");
+            $stmt = $this->pdo->query($sql);
         }
         return $stmt->fetchAll();
     }
@@ -997,6 +1096,33 @@ class Database {
     public function completeRetestRequest($id) {
         $stmt = $this->pdo->prepare("UPDATE retest_requests SET status = 'completed', completed_at = NOW() WHERE id = ?");
         return $stmt->execute([$id]);
+    }
+
+    /**
+     * Complete all pending retest requests for a specific client_version that match the given commit hash.
+     * This is called when a report is submitted - if the submitted commit matches the retest's original commit,
+     * the retest is considered fulfilled.
+     *
+     * @param string $clientVersion The client version
+     * @param string $commitHash The commit hash from the submitted report
+     * @return int Number of retest requests completed
+     */
+    public function completeRetestRequestsByCommit($clientVersion, $commitHash) {
+        if (empty($clientVersion) || empty($commitHash)) {
+            return 0;
+        }
+
+        // Find pending retest requests for this client version where the original report's commit hash matches
+        $stmt = $this->pdo->prepare("
+            UPDATE retest_requests rr
+            INNER JOIN reports r ON rr.report_id = r.id
+            SET rr.status = 'completed', rr.completed_at = NOW()
+            WHERE rr.client_version = ?
+              AND rr.status = 'pending'
+              AND r.commit_hash = ?
+        ");
+        $stmt->execute([$clientVersion, $commitHash]);
+        return $stmt->rowCount();
     }
 
     /**
@@ -1030,17 +1156,24 @@ class Database {
     }
 
     /**
-     * Get all pending retest requests as a lookup map (test_key|client_version => true)
+     * Get all pending retest requests as a lookup map (test_key|client_version => data)
      * Optimized for batch checking in table views
+     * Returns notes and other info so they can be displayed to all users
      */
     public function getPendingRetestRequestsMap() {
         $stmt = $this->pdo->query("
-            SELECT test_key, client_version FROM retest_requests WHERE status = 'pending'
+            SELECT test_key, client_version, notes, reason, created_by, created_at
+            FROM retest_requests WHERE status = 'pending'
         ");
         $map = [];
         while ($row = $stmt->fetch()) {
             $key = $row['test_key'] . '|' . $row['client_version'];
-            $map[$key] = true;
+            $map[$key] = [
+                'notes' => $row['notes'] ?? '',
+                'reason' => $row['reason'] ?? '',
+                'created_by' => $row['created_by'] ?? '',
+                'created_at' => $row['created_at'] ?? ''
+            ];
         }
         return $map;
     }
@@ -1129,6 +1262,7 @@ class Database {
                 'notes' => $request['notes'] ?? '',
                 'report_id' => $request['report_id'] ?? null,
                 'report_revision' => $request['report_revision'] ?? null,
+                'tested_commit_hash' => $request['tested_commit_hash'] ?? null,
                 'latest_revision' => false,
                 'created_at' => $request['created_at']
             ];
@@ -2313,11 +2447,20 @@ class Database {
         }
 
         // Filter categories to only include tests in template
-        $templateTestKeys = array_flip($template['test_keys']); // O(1) lookup
+        // Normalize test keys to strings for consistent comparison
+        $normalizedKeys = [];
+        foreach ($template['test_keys'] as $key) {
+            $normalizedKeys[(string)$key] = true;
+        }
         $filteredCategories = [];
 
         foreach ($allCategories as $categoryName => $tests) {
-            $filteredTests = array_intersect_key($tests, $templateTestKeys);
+            $filteredTests = [];
+            foreach ($tests as $testKey => $testInfo) {
+                if (isset($normalizedKeys[(string)$testKey])) {
+                    $filteredTests[$testKey] = $testInfo;
+                }
+            }
             // Only include category if it has visible tests
             if (!empty($filteredTests)) {
                 $filteredCategories[$categoryName] = $filteredTests;
@@ -2702,9 +2845,12 @@ class Database {
 
     /**
      * Get client version by version_id string
+     * Tries exact match first, then falls back to matching without trailing commit hash
      */
     public function getClientVersionByVersionId($versionId) {
         $this->ensureClientVersionsTable();
+
+        // First try exact match
         $stmt = $this->pdo->prepare("
             SELECT cv.*, u.username as creator_name
             FROM client_versions cv
@@ -2713,6 +2859,33 @@ class Database {
         ");
         $stmt->execute([$versionId]);
         $version = $stmt->fetch();
+
+        // If no exact match, try matching without trailing commit hash
+        // Report's client_version might have a hash suffix that the stored version_id doesn't
+        if (!$version && $versionId) {
+            $cleanedVersionId = preg_replace('/[\s_]+[(\[]?[0-9a-fA-F]{7,40}[)\]]?\s*$/', '', $versionId);
+            $cleanedVersionId = trim($cleanedVersionId);
+
+            if ($cleanedVersionId !== $versionId) {
+                $stmt->execute([$cleanedVersionId]);
+                $version = $stmt->fetch();
+            }
+        }
+
+        // If still no match, try matching the stored version_id against our input
+        // Stored version_id might have a hash suffix that our input doesn't
+        if (!$version && $versionId) {
+            $stmt = $this->pdo->prepare("
+                SELECT cv.*, u.username as creator_name
+                FROM client_versions cv
+                LEFT JOIN users u ON cv.created_by = u.id
+                WHERE cv.version_id LIKE CONCAT(?, '%')
+                   OR ? LIKE CONCAT(cv.version_id, '%')
+                LIMIT 1
+            ");
+            $stmt->execute([$versionId, $versionId]);
+            $version = $stmt->fetch();
+        }
 
         if ($version) {
             $version['packages'] = json_decode($version['packages'], true) ?? [];
@@ -3779,6 +3952,107 @@ class Database {
      */
     public function getSiteTitle() {
         return $this->getSetting('site_title', PANEL_NAME);
+    }
+
+    // =====================
+    // FLAG ACKNOWLEDGEMENTS
+    // =====================
+
+    /**
+     * Ensure flag_acknowledgements table exists
+     */
+    public function ensureFlagAcknowledgementsTable() {
+        try {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS flag_acknowledgements (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    flag_type ENUM('retest', 'fixed') NOT NULL,
+                    flag_id INT NOT NULL,
+                    username VARCHAR(100) NOT NULL,
+                    acknowledged_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY unique_ack (flag_type, flag_id, username),
+                    INDEX idx_username (username),
+                    INDEX idx_flag (flag_type, flag_id)
+                ) ENGINE=InnoDB
+            ");
+            return true;
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Get unacknowledged flags for a user (lightweight query for polling)
+     */
+    public function getUnacknowledgedFlags($username) {
+        $this->ensureFlagAcknowledgementsTable();
+
+        $flags = [];
+
+        // Get pending retest requests not acknowledged by this user
+        $stmt = $this->pdo->prepare("
+            SELECT r.id, r.test_key, r.client_version, r.notes, r.created_at,
+                   'retest' as flag_type
+            FROM retest_requests r
+            LEFT JOIN flag_acknowledgements fa
+                ON fa.flag_type = 'retest' AND fa.flag_id = r.id AND fa.username = ?
+            WHERE r.status = 'pending' AND fa.id IS NULL
+            ORDER BY r.created_at DESC
+        ");
+        $stmt->execute([$username]);
+        $retests = $stmt->fetchAll();
+
+        // Get pending fixed tests not acknowledged by this user
+        $stmt = $this->pdo->prepare("
+            SELECT f.id, f.test_key, f.client_version, f.notes, f.commit_hash, f.created_at,
+                   'fixed' as flag_type
+            FROM fixed_tests f
+            LEFT JOIN flag_acknowledgements fa
+                ON fa.flag_type = 'fixed' AND fa.flag_id = f.id AND fa.username = ?
+            WHERE f.status = 'pending_retest' AND fa.id IS NULL
+            ORDER BY f.created_at DESC
+        ");
+        $stmt->execute([$username]);
+        $fixed = $stmt->fetchAll();
+
+        return array_merge($retests, $fixed);
+    }
+
+    /**
+     * Acknowledge a flag notification for a user
+     */
+    public function acknowledgeFlagNotification($flagType, $flagId, $username) {
+        $this->ensureFlagAcknowledgementsTable();
+
+        if (!in_array($flagType, ['retest', 'fixed'])) {
+            return false;
+        }
+
+        try {
+            $stmt = $this->pdo->prepare("
+                INSERT IGNORE INTO flag_acknowledgements (flag_type, flag_id, username)
+                VALUES (?, ?, ?)
+            ");
+            $stmt->execute([$flagType, $flagId, $username]);
+            return $stmt->rowCount() > 0 || true; // Success even if already acknowledged
+        } catch (PDOException $e) {
+            return false;
+        }
+    }
+
+    /**
+     * Check if a flag has been acknowledged by a user
+     */
+    public function isFlagAcknowledged($flagType, $flagId, $username) {
+        $this->ensureFlagAcknowledgementsTable();
+
+        $stmt = $this->pdo->prepare("
+            SELECT 1 FROM flag_acknowledgements
+            WHERE flag_type = ? AND flag_id = ? AND username = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$flagType, $flagId, $username]);
+        return $stmt->fetch() !== false;
     }
 }
 

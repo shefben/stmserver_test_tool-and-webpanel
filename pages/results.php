@@ -255,7 +255,9 @@ function buildStatusLink($status, $baseParams) {
                     <?php foreach ($results as $result): ?>
                         <?php
                         $retestKey = $result['test_key'] . '|' . $result['client_version'];
-                        $hasPendingRetest = isset($pendingRetestMap[$retestKey]);
+                        $retestInfo = $pendingRetestMap[$retestKey] ?? null;
+                        $hasPendingRetest = $retestInfo !== null;
+                        $retestNotes = $retestInfo['notes'] ?? '';
                         ?>
                         <tr class="<?= $hasPendingRetest ? 'retest-pending' : '' ?>">
                             <td>
@@ -296,8 +298,15 @@ function buildStatusLink($status, $baseParams) {
                                 data-tester="<?= e($result['tester']) ?>">
                                 <?php if ($result['notes']): ?>
                                     <div class="notes-content"><?= e($result['notes']) ?></div>
+                                    <span class="notes-read-more">... read more</span>
                                 <?php else: ?>
                                     <span class="notes-empty">-</span>
+                                <?php endif; ?>
+                                <?php if ($hasPendingRetest && $retestNotes): ?>
+                                    <div class="retest-notes">
+                                        <span class="retest-notes-label">Retest notes:</span>
+                                        <?= e($retestNotes) ?>
+                                    </div>
                                 <?php endif; ?>
                             </td>
                             <td>
@@ -431,6 +440,62 @@ tr.retest-pending:hover {
 .btn-retest:disabled {
     background: #7f8c8d;
     cursor: not-allowed;
+}
+
+/* Retest notes display (visible to all users) */
+.retest-notes {
+    background: rgba(243, 156, 18, 0.15);
+    border-left: 3px solid #f39c12;
+    padding: 6px 8px;
+    margin-top: 6px;
+    font-size: 12px;
+    color: #d8ded3;
+    border-radius: 0 4px 4px 0;
+}
+.retest-notes-label {
+    font-weight: bold;
+    color: #f39c12;
+    font-size: 10px;
+    text-transform: uppercase;
+    display: block;
+    margin-bottom: 2px;
+}
+
+/* Notes cell truncation */
+.notes-cell {
+    position: relative;
+}
+
+.notes-cell .notes-content {
+    max-height: 4.5em; /* Approximately 3 lines */
+    overflow: hidden;
+    line-height: 1.5;
+}
+
+.notes-cell.expanded .notes-content {
+    max-height: none;
+    overflow: visible;
+}
+
+.notes-cell .notes-read-more {
+    display: none;
+    color: #3498db;
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: 12px;
+    margin-top: 4px;
+}
+
+.notes-cell .notes-read-more:hover {
+    color: #2980b9;
+}
+
+.notes-cell.truncated .notes-read-more {
+    display: inline-block;
+}
+
+.notes-cell.expanded .notes-read-more {
+    display: none;
 }
 </style>
 
@@ -790,7 +855,7 @@ document.getElementById('retest-modal')?.addEventListener('click', function(e) {
 }
 
 .notes-detail-box {
-    background: var(--bg-card);
+    background: var(--bg-card, #3e4637);
     border-radius: 8px;
     width: 90%;
     max-width: 600px;
@@ -909,27 +974,28 @@ document.getElementById('retest-modal')?.addEventListener('click', function(e) {
 <!-- Rich Notes Initialization -->
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    // Initialize rich notes rendering for notes cells
-    if (typeof RichNotesRenderer !== 'undefined') {
-        document.querySelectorAll('.notes-cell.rich-notes').forEach(function(cell) {
-            var contentEl = cell.querySelector('.notes-content');
-            if (!contentEl) return;
+    // Note: Rich notes (images) are NOT rendered in table cells - only in modals
+    // This keeps the table clean and readable with truncated text
 
-            var rawContent = cell.getAttribute('data-full') || contentEl.textContent;
+    // Strip image markers from table cell display (but keep raw content in data-full for modal)
+    document.querySelectorAll('.notes-cell.rich-notes .notes-content').forEach(function(contentEl) {
+        var text = contentEl.textContent;
+        // Remove {{IMAGE:...}} markers from display
+        var cleanText = text.replace(/\{\{IMAGE:[^}]+\}\}/g, '').trim();
+        if (cleanText !== text) {
+            contentEl.textContent = cleanText || '(image only)';
+        }
+    });
 
-            // Check if content has rich formatting
-            if (RichNotesRenderer.hasRichContent(rawContent)) {
-                contentEl.innerHTML = RichNotesRenderer.render(rawContent);
-                cell.classList.add('rich-notes-rendered');
-                cell.classList.add('expanded');
-                cell.style.cursor = 'pointer';
-            }
-        });
-    }
+    // Notes truncation detection
+    initNotesTruncation();
 
     // Add click handler for notes cells
     document.querySelectorAll('.notes-cell.has-notes').forEach(function(cell) {
-        cell.addEventListener('click', function() {
+        cell.addEventListener('click', function(e) {
+            // If click was on read-more, don't open modal
+            if (e.target.classList.contains('notes-read-more')) return;
+
             var testKey = this.getAttribute('data-test-key');
             var testName = this.getAttribute('data-test-name');
             var status = this.getAttribute('data-status');
@@ -940,6 +1006,35 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 });
+
+function initNotesTruncation() {
+    document.querySelectorAll('.notes-cell .notes-content').forEach(function(content) {
+        // Check if content is truncated (scrollHeight > clientHeight)
+        var cell = content.closest('.notes-cell');
+        if (!cell) return;
+
+        // Skip cells that are already expanded (e.g., rich-notes-rendered)
+        if (cell.classList.contains('expanded')) return;
+
+        // Use setTimeout to ensure rendering is complete
+        setTimeout(function() {
+            if (content.scrollHeight > content.clientHeight) {
+                cell.classList.add('truncated');
+            }
+        }, 0);
+    });
+
+    // Handle read more click
+    document.querySelectorAll('.notes-cell .notes-read-more').forEach(function(readMore) {
+        readMore.addEventListener('click', function(e) {
+            e.stopPropagation();
+            var cell = this.closest('.notes-cell');
+            if (cell) {
+                cell.classList.remove('truncated');
+                cell.classList.add('expanded');
+            }
+        });
+    });
 
 function showNotesDetailModal(testKey, testName, status, version, notes) {
     document.getElementById('notes-detail-title').textContent = 'Test Details: ' + testKey;

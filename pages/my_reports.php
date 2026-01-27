@@ -117,9 +117,9 @@ foreach ($reports as $report) {
                                     #<?= $report['id'] ?>
                                 </a>
                                 <?php if (($report['revision_count'] ?? 0) > 0): ?>
-                                    <span class="revision-badge" title="Has <?= $report['revision_count'] ?> revision(s)">
+                                    <a href="?page=report_revisions&id=<?= $report['id'] ?>" class="revision-badge revision-below" title="Has <?= $report['revision_count'] ?> revision(s)">
                                         v<?= $report['revision_count'] + 1 ?>
-                                    </span>
+                                    </a>
                                 <?php endif; ?>
                             </td>
                             <td><?= e(shortVersionName($report['client_version'])) ?></td>
@@ -245,6 +245,19 @@ foreach ($reports as $report) {
     border-radius: 3px;
     margin-left: 5px;
     vertical-align: middle;
+    text-decoration: none;
+}
+.revision-badge:hover {
+    background: var(--primary-dark, #c0392b);
+}
+
+/* Revision badge displayed below ID */
+.revision-badge.revision-below {
+    display: block;
+    margin-left: 0;
+    margin-top: 4px;
+    text-align: center;
+    width: fit-content;
 }
 
 /* Commit hash */

@@ -31,7 +31,7 @@ from typing import Optional, List, Callable, Any
 from datetime import datetime
 from dataclasses import dataclass
 
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+from PyQt5.QtCore import QObject, pyqtSignal, QTimer, QThread, QMutex, QWaitCondition
 
 # Try to import the API client from the test tool directory
 try:
@@ -98,10 +98,191 @@ class RetestNotification:
     client_version: str
     reason: str
     latest_revision: bool
-    commit_hash: Optional[str] = None
+    commit_hash: Optional[str] = None  # Fix commit (for 'fixed' type)
     notes: Optional[str] = None  # Admin notes explaining what to retest
     report_id: Optional[int] = None  # Associated report ID
     report_revision: Optional[int] = None  # Report revision when retest was requested
+    tested_commit_hash: Optional[str] = None  # Commit hash the test was originally submitted against
+
+
+class ApiWorker(QThread):
+    """
+    Background worker thread for API operations.
+
+    Handles all network requests in a separate thread to prevent
+    the UI from freezing during API calls.
+    """
+
+    # Signals for operation results - each emits (operation_id, success, result_or_error)
+    tests_result = pyqtSignal(str, bool, object)  # get_tests result
+    versions_result = pyqtSignal(str, bool, object)  # get_versions result
+    user_info_result = pyqtSignal(str, bool, object)  # get_user_info result
+    logs_result = pyqtSignal(str, bool, object)  # get_report_logs result
+    log_download_result = pyqtSignal(str, bool, object)  # download_report_log result
+    log_delete_result = pyqtSignal(str, bool, object)  # delete_report_log result
+    connection_result = pyqtSignal(str, bool, str)  # test_connection result
+    flags_result = pyqtSignal(str, bool, object)  # check_flags result
+    acknowledge_result = pyqtSignal(str, bool, object)  # acknowledge_flag result
+    hash_check_result = pyqtSignal(str, bool, object)  # check_hashes result
+    retests_result = pyqtSignal(str, bool, object)  # get_retest_queue result
+    generic_result = pyqtSignal(str, bool, object)  # generic operation result
+
+    # Signal for worker errors
+    error_occurred = pyqtSignal(str, str)  # (operation_id, error_message)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._task_queue = []
+        self._mutex = QMutex()
+        self._condition = QWaitCondition()
+        self._stop = False
+        self._client = None
+
+    def set_client(self, client):
+        """Set the API client to use for requests."""
+        self._client = client
+
+    def stop(self):
+        """Stop the worker thread."""
+        self._mutex.lock()
+        self._stop = True
+        self._condition.wakeAll()
+        self._mutex.unlock()
+        self.wait()
+
+    def queue_task(self, operation: str, operation_id: str, **kwargs):
+        """
+        Queue a task for background execution.
+
+        Args:
+            operation: The operation name (e.g., 'get_tests', 'get_versions')
+            operation_id: A unique ID to identify this request in callbacks
+            **kwargs: Arguments to pass to the operation
+        """
+        self._mutex.lock()
+        self._task_queue.append({
+            'operation': operation,
+            'operation_id': operation_id,
+            'kwargs': kwargs
+        })
+        self._condition.wakeAll()
+        self._mutex.unlock()
+
+        # Start thread if not running
+        if not self.isRunning():
+            self.start()
+
+    def run(self):
+        """Main worker loop - processes tasks from the queue."""
+        while True:
+            self._mutex.lock()
+
+            # Wait for tasks or stop signal
+            while not self._task_queue and not self._stop:
+                self._condition.wait(self._mutex)
+
+            if self._stop:
+                self._mutex.unlock()
+                break
+
+            if self._task_queue:
+                task = self._task_queue.pop(0)
+            else:
+                task = None
+
+            self._mutex.unlock()
+
+            if task:
+                self._process_task(task)
+
+    def _process_task(self, task: dict):
+        """Process a single task."""
+        operation = task['operation']
+        operation_id = task['operation_id']
+        kwargs = task['kwargs']
+
+        if not self._client:
+            self.error_occurred.emit(operation_id, "API client not configured")
+            return
+
+        try:
+            if operation == 'get_tests':
+                result = self._client.get_tests(
+                    enabled_only=kwargs.get('enabled_only', True),
+                    client_version=kwargs.get('client_version'),
+                    use_cache=kwargs.get('use_cache', True)
+                )
+                self.tests_result.emit(operation_id, result.success, result)
+
+            elif operation == 'get_versions':
+                result = self._client.get_versions(
+                    enabled_only=kwargs.get('enabled_only', True),
+                    include_notifications=kwargs.get('include_notifications', False),
+                    use_cache=kwargs.get('use_cache', True)
+                )
+                self.versions_result.emit(operation_id, result.success, result)
+
+            elif operation == 'get_user_info':
+                result = self._client.get_user_info()
+                self.user_info_result.emit(operation_id, result.success if result else False, result)
+
+            elif operation == 'get_report_logs':
+                report_id = kwargs.get('report_id')
+                logs = self._client.get_report_logs(report_id)
+                self.logs_result.emit(operation_id, True, logs)
+
+            elif operation == 'download_report_log':
+                log_id = kwargs.get('log_id')
+                decompress = kwargs.get('decompress', True)
+                content = self._client.download_report_log(log_id, decompress)
+                self.log_download_result.emit(operation_id, content is not None, content)
+
+            elif operation == 'delete_report_log':
+                log_id = kwargs.get('log_id')
+                success = self._client.delete_report_log(log_id)
+                self.log_delete_result.emit(operation_id, success, None)
+
+            elif operation == 'test_connection':
+                connected = self._client.test_connection()
+                msg = "Connected" if connected else "Connection failed"
+                self.connection_result.emit(operation_id, connected, msg)
+
+            elif operation == 'check_flags':
+                result = self._client.check_flags()
+                self.flags_result.emit(operation_id, result.get('success', False), result)
+
+            elif operation == 'acknowledge_flag':
+                flag_type = kwargs.get('flag_type')
+                flag_id = kwargs.get('flag_id')
+                success = self._client.acknowledge_flag(flag_type, flag_id)
+                self.acknowledge_result.emit(operation_id, success, None)
+
+            elif operation == 'check_hashes':
+                hashes = kwargs.get('hashes')
+                tester = kwargs.get('tester')
+                test_type = kwargs.get('test_type')
+                commit_hash = kwargs.get('commit_hash')
+                result = self._client.check_hashes(hashes, tester, test_type, commit_hash)
+                self.hash_check_result.emit(operation_id, result.success, result)
+
+            elif operation == 'get_retest_queue':
+                client_version = kwargs.get('client_version')
+                items = self._client.get_retest_queue(client_version)
+                self.retests_result.emit(operation_id, True, items)
+
+            elif operation == 'find_report_id':
+                tester = kwargs.get('tester')
+                client_version = kwargs.get('client_version')
+                test_type = kwargs.get('test_type')
+                report_id = self._client.find_report_id(tester, client_version, test_type)
+                self.generic_result.emit(operation_id, report_id is not None, report_id)
+
+            else:
+                self.error_occurred.emit(operation_id, f"Unknown operation: {operation}")
+
+        except Exception as e:
+            logger.error(f"Error in API worker ({operation}): {e}")
+            self.error_occurred.emit(operation_id, str(e))
 
 
 class PanelIntegration(QObject):
@@ -124,6 +305,10 @@ class PanelIntegration(QObject):
     # Emits (connected: bool, message: str)
     connection_status = pyqtSignal(bool, str)
 
+    # Signal emitted when new flags are found (for background polling)
+    # Emits (count: int, flags: list)
+    flag_notification = pyqtSignal(int, list)
+
     # Default config file locations relative to test tool
     CONFIG_FILENAMES = [
         'test_panel_config.json',
@@ -131,6 +316,16 @@ class PanelIntegration(QObject):
         'api_config.json',
         'config.json',
     ]
+
+    # Additional signals for async operations
+    tests_loaded = pyqtSignal(bool, object)  # (success, TestsResult or error string)
+    versions_loaded = pyqtSignal(bool, object)  # (success, VersionsResult or error string)
+    user_info_loaded = pyqtSignal(bool, object)  # (success, UserInfo or error string)
+    logs_loaded = pyqtSignal(bool, object)  # (success, list of ReportLog or error string)
+    log_downloaded = pyqtSignal(bool, object)  # (success, content or error string)
+    log_deleted = pyqtSignal(bool, str)  # (success, message)
+    hashes_checked = pyqtSignal(bool, object)  # (success, HashCheckResult or error string)
+    operation_error = pyqtSignal(str)  # Error message
 
     def __init__(self, controller=None, parent=None, auto_load_config=False):
         """
@@ -150,6 +345,11 @@ class PanelIntegration(QObject):
         self._last_retests: List[RetestNotification] = []
         self._is_monitoring = False
         self._offline_mode = False  # When True, all API calls are blocked until restart
+
+        # Background API worker for non-blocking operations
+        self._worker: Optional[ApiWorker] = None
+        self._operation_counter = 0  # For generating unique operation IDs
+        self._pending_callbacks = {}  # Maps operation_id to callback function
 
         # Only try to load config automatically if explicitly requested
         if auto_load_config:
@@ -200,6 +400,485 @@ class PanelIntegration(QObject):
 
         logger.info("No config file found. Use create_config() to create one.")
         return False
+
+    # =========================================================================
+    # Background Worker Management
+    # =========================================================================
+
+    def _get_operation_id(self) -> str:
+        """Generate a unique operation ID for tracking async requests."""
+        self._operation_counter += 1
+        return f"op_{self._operation_counter}_{datetime.now().strftime('%H%M%S%f')}"
+
+    def _ensure_worker(self):
+        """Ensure the background worker is initialized and running."""
+        if self._worker is None:
+            self._worker = ApiWorker(self)
+            # Connect worker signals to handlers
+            self._worker.tests_result.connect(self._on_tests_result)
+            self._worker.versions_result.connect(self._on_versions_result)
+            self._worker.user_info_result.connect(self._on_user_info_result)
+            self._worker.logs_result.connect(self._on_logs_result)
+            self._worker.log_download_result.connect(self._on_log_download_result)
+            self._worker.log_delete_result.connect(self._on_log_delete_result)
+            self._worker.connection_result.connect(self._on_connection_result)
+            self._worker.flags_result.connect(self._on_flags_result)
+            self._worker.acknowledge_result.connect(self._on_acknowledge_result)
+            self._worker.hash_check_result.connect(self._on_hash_check_result)
+            self._worker.retests_result.connect(self._on_retests_result)
+            self._worker.generic_result.connect(self._on_generic_result)
+            self._worker.error_occurred.connect(self._on_worker_error)
+
+        if self._client:
+            self._worker.set_client(self._client)
+
+    def _stop_worker(self):
+        """Stop the background worker thread."""
+        if self._worker:
+            self._worker.stop()
+            self._worker = None
+
+    # Worker signal handlers
+    def _on_tests_result(self, operation_id: str, success: bool, result):
+        """Handle tests result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        self.tests_loaded.emit(success, result)
+
+    def _on_versions_result(self, operation_id: str, success: bool, result):
+        """Handle versions result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        self.versions_loaded.emit(success, result)
+
+    def _on_user_info_result(self, operation_id: str, success: bool, result):
+        """Handle user info result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        self.user_info_loaded.emit(success, result)
+
+    def _on_logs_result(self, operation_id: str, success: bool, result):
+        """Handle report logs result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        self.logs_loaded.emit(success, result)
+
+    def _on_log_download_result(self, operation_id: str, success: bool, result):
+        """Handle log download result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        self.log_downloaded.emit(success, result)
+
+    def _on_log_delete_result(self, operation_id: str, success: bool, result):
+        """Handle log delete result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        msg = "Log deleted successfully" if success else "Failed to delete log"
+        self.log_deleted.emit(success, msg)
+
+    def _on_connection_result(self, operation_id: str, success: bool, message: str):
+        """Handle connection test result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, message)
+        self.connection_status.emit(success, message)
+
+    def _on_flags_result(self, operation_id: str, success: bool, result):
+        """Handle flags check result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        if success and result.get('count', 0) > 0:
+            self.flag_notification.emit(result['count'], result.get('flags', []))
+
+    def _on_acknowledge_result(self, operation_id: str, success: bool, result):
+        """Handle flag acknowledge result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+
+    def _on_hash_check_result(self, operation_id: str, success: bool, result):
+        """Handle hash check result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        self.hashes_checked.emit(success, result)
+
+    def _on_retests_result(self, operation_id: str, success: bool, result):
+        """Handle retests result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+        if success and result:
+            # Convert to notification objects
+            notifications = [
+                RetestNotification(
+                    type=item.type,
+                    test_key=item.test_key,
+                    test_name=item.test_name,
+                    client_version=item.client_version,
+                    reason=item.reason,
+                    latest_revision=item.latest_revision,
+                    commit_hash=item.commit_hash,
+                    notes=item.notes,
+                    report_id=item.report_id,
+                    report_revision=item.report_revision,
+                    tested_commit_hash=item.tested_commit_hash
+                )
+                for item in result
+            ]
+            self._last_retests = notifications
+            self.retest_notification.emit(notifications)
+
+    def _on_generic_result(self, operation_id: str, success: bool, result):
+        """Handle generic operation result from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(success, result)
+
+    def _on_worker_error(self, operation_id: str, error_message: str):
+        """Handle error from worker."""
+        callback = self._pending_callbacks.pop(operation_id, None)
+        if callback:
+            callback(False, error_message)
+        self.operation_error.emit(error_message)
+        logger.error(f"Worker error ({operation_id}): {error_message}")
+
+    # =========================================================================
+    # Async API Methods (Non-blocking)
+    # =========================================================================
+
+    def get_tests_async(self, enabled_only: bool = True, client_version: str = None,
+                        callback: Callable[[bool, Any], None] = None):
+        """
+        Get tests from the API asynchronously (non-blocking).
+
+        Args:
+            enabled_only: If True, only return enabled tests
+            client_version: Optional client version for template-specific tests
+            callback: Optional callback function(success, result)
+
+        Result is emitted via tests_loaded signal.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, "Offline mode - restart to reconnect")
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, "Not configured")
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task(
+            'get_tests',
+            operation_id,
+            enabled_only=enabled_only,
+            client_version=client_version
+        )
+
+    def get_versions_async(self, enabled_only: bool = True, include_notifications: bool = False,
+                           callback: Callable[[bool, Any], None] = None):
+        """
+        Get versions from the API asynchronously (non-blocking).
+
+        Args:
+            enabled_only: If True, only return enabled versions
+            include_notifications: If True, include notifications for each version
+            callback: Optional callback function(success, result)
+
+        Result is emitted via versions_loaded signal.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, "Offline mode - restart to reconnect")
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, "Not configured")
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task(
+            'get_versions',
+            operation_id,
+            enabled_only=enabled_only,
+            include_notifications=include_notifications
+        )
+
+    def get_user_info_async(self, callback: Callable[[bool, Any], None] = None):
+        """
+        Get user info from the API asynchronously (non-blocking).
+
+        Args:
+            callback: Optional callback function(success, result)
+
+        Result is emitted via user_info_loaded signal.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, "Offline mode - restart to reconnect")
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, "Not configured")
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task('get_user_info', operation_id)
+
+    def get_report_logs_async(self, report_id: int, callback: Callable[[bool, Any], None] = None):
+        """
+        Get report logs from the API asynchronously (non-blocking).
+
+        Args:
+            report_id: The report ID
+            callback: Optional callback function(success, result)
+
+        Result is emitted via logs_loaded signal.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, "Offline mode - restart to reconnect")
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, "Not configured")
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task('get_report_logs', operation_id, report_id=report_id)
+
+    def download_report_log_async(self, log_id: int, decompress: bool = True,
+                                   callback: Callable[[bool, Any], None] = None):
+        """
+        Download a report log asynchronously (non-blocking).
+
+        Args:
+            log_id: The log file ID
+            decompress: If True, decompress and return as string
+            callback: Optional callback function(success, content)
+
+        Result is emitted via log_downloaded signal.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, "Offline mode - restart to reconnect")
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, "Not configured")
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task('download_report_log', operation_id, log_id=log_id, decompress=decompress)
+
+    def delete_report_log_async(self, log_id: int, callback: Callable[[bool, Any], None] = None):
+        """
+        Delete a report log asynchronously (non-blocking).
+
+        Args:
+            log_id: The log file ID to delete
+            callback: Optional callback function(success, result)
+
+        Result is emitted via log_deleted signal.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, "Offline mode - restart to reconnect")
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, "Not configured")
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task('delete_report_log', operation_id, log_id=log_id)
+
+    def test_connection_async(self, callback: Callable[[bool, str], None] = None):
+        """
+        Test the API connection asynchronously (non-blocking).
+
+        Args:
+            callback: Optional callback function(success, message)
+
+        Result is emitted via connection_status signal.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, "Offline mode - restart to reconnect")
+            self.connection_status.emit(False, "Offline mode - restart to reconnect")
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, "Not configured")
+            self.connection_status.emit(False, "Not configured")
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task('test_connection', operation_id)
+
+    def check_flags_async(self, callback: Callable[[bool, Any], None] = None):
+        """
+        Check for flags asynchronously (non-blocking).
+
+        Args:
+            callback: Optional callback function(success, result)
+
+        Result is emitted via flag_notification signal if flags found.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, {'success': False, 'count': 0, 'flags': []})
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, {'success': False, 'count': 0, 'flags': []})
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task('check_flags', operation_id)
+
+    def acknowledge_flag_async(self, flag_type: str, flag_id: int,
+                                callback: Callable[[bool, Any], None] = None):
+        """
+        Acknowledge a flag asynchronously (non-blocking).
+
+        Args:
+            flag_type: 'retest' or 'fixed'
+            flag_id: The flag's ID
+            callback: Optional callback function(success, result)
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, None)
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, None)
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task('acknowledge_flag', operation_id, flag_type=flag_type, flag_id=flag_id)
+
+    def check_hashes_async(self, hashes: dict, tester: str, test_type: str,
+                           commit_hash: str = None, callback: Callable[[bool, Any], None] = None):
+        """
+        Check report hashes asynchronously (non-blocking).
+
+        Args:
+            hashes: Dict mapping version_id to content hash
+            tester: Tester name
+            test_type: Test type (WAN, LAN, WAN/LAN)
+            commit_hash: Optional commit hash
+            callback: Optional callback function(success, result)
+
+        Result is emitted via hashes_checked signal.
+        """
+        if self._offline_mode:
+            if callback:
+                from api_client import HashCheckResult
+                callback(False, HashCheckResult(success=False, error="Offline mode"))
+            return
+
+        if not self.is_configured:
+            if callback:
+                from api_client import HashCheckResult
+                callback(False, HashCheckResult(success=False, error="Not configured"))
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task(
+            'check_hashes',
+            operation_id,
+            hashes=hashes,
+            tester=tester,
+            test_type=test_type,
+            commit_hash=commit_hash
+        )
+
+    def check_retests_async(self, client_version: str = None,
+                            callback: Callable[[bool, Any], None] = None):
+        """
+        Check for retests asynchronously (non-blocking).
+
+        Args:
+            client_version: Optional filter by client version
+            callback: Optional callback function(success, result)
+
+        Result is emitted via retest_notification signal if retests found.
+        """
+        if self._offline_mode:
+            if callback:
+                callback(False, [])
+            return
+
+        if not self.is_configured:
+            if callback:
+                callback(False, [])
+            return
+
+        self._ensure_worker()
+        operation_id = self._get_operation_id()
+        if callback:
+            self._pending_callbacks[operation_id] = callback
+
+        self._worker.queue_task('get_retest_queue', operation_id, client_version=client_version)
 
     def load_config(self, path: str) -> bool:
         """
@@ -421,7 +1100,8 @@ class PanelIntegration(QObject):
                         commit_hash=item.commit_hash,
                         notes=item.notes,
                         report_id=item.report_id,
-                        report_revision=item.report_revision
+                        report_revision=item.report_revision,
+                        tested_commit_hash=item.tested_commit_hash
                     )
                     for item in items
                 ]
@@ -441,6 +1121,51 @@ class PanelIntegration(QObject):
         """
         self._check_for_retests()
         return self._last_retests
+
+    def check_flags_lightweight(self) -> dict:
+        """
+        Lightweight flag check for periodic polling in background thread.
+
+        This is designed to be called frequently without freezing the UI.
+        Returns unacknowledged flags for the current user.
+
+        Returns:
+            Dict with 'success', 'count', and 'flags' keys
+        """
+        if self._offline_mode:
+            return {'success': False, 'count': 0, 'flags': []}
+
+        if not self.is_configured:
+            return {'success': False, 'count': 0, 'flags': []}
+
+        try:
+            return self._client.check_flags()
+        except Exception as e:
+            logger.debug(f"Flag check failed: {e}")
+            return {'success': False, 'count': 0, 'flags': [], 'error': str(e)}
+
+    def acknowledge_flag(self, flag_type: str, flag_id: int) -> bool:
+        """
+        Acknowledge a flag notification so it won't show again.
+
+        Args:
+            flag_type: 'retest' or 'fixed'
+            flag_id: The flag's ID
+
+        Returns:
+            True if acknowledged successfully
+        """
+        if self._offline_mode:
+            return False
+
+        if not self.is_configured:
+            return False
+
+        try:
+            return self._client.acknowledge_flag(flag_type, flag_id)
+        except Exception as e:
+            logger.error(f"Error acknowledging flag: {e}")
+            return False
 
     def check_hashes(self, hashes: dict, tester: str, test_type: str,
                      commit_hash: str = None):
@@ -575,7 +1300,8 @@ class PanelIntegration(QObject):
                     commit_hash=item.commit_hash,
                     notes=item.notes,
                     report_id=item.report_id,
-                    report_revision=item.report_revision
+                    report_revision=item.report_revision,
+                    tested_commit_hash=item.tested_commit_hash
                 )
                 for item in items
             ]
@@ -974,8 +1700,8 @@ def show_retest_dialog(retests: List[RetestNotification], parent=None):
         if r.report_id:
             revision_info = f" (revision {r.report_revision})" if r.report_revision is not None else ""
             html += f'<br>Report ID: #{r.report_id}{revision_info}'
-        if r.report_revision is not None:
-            html += f'<br><b>Test with revision: {r.report_revision}</b>'
+        if r.tested_commit_hash is not None:
+            html += f'<br><b>Test with commit revision: {r.tested_commit_hash}</b>'
         if r.latest_revision:
             html += '<br><span class="warning">⚠️ Please use latest emulator revision</span>'
         if r.commit_hash:

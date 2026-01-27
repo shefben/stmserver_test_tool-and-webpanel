@@ -438,6 +438,47 @@ if (isGitHubConfigured()) {
     position: relative;
 }
 
+/* BBCode toolbar */
+.bbcode-toolbar {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 4px;
+    padding: 3px;
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    border-radius: 4px 4px 0 0;
+    border-bottom: none;
+}
+
+.bbcode-btn {
+    padding: 3px 8px;
+    font-size: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.15s ease;
+    line-height: 1;
+    min-width: 26px;
+    text-align: center;
+}
+
+.bbcode-btn:hover {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+}
+
+.bbcode-btn:active {
+    transform: scale(0.95);
+}
+
+/* Adjust textarea when toolbar is present */
+.notes-input-wrapper .notes-textarea {
+    border-radius: 0 0 4px 4px;
+}
+
 /* Notes input */
 .notes-input {
     width: 100%;
@@ -829,7 +870,15 @@ function renderTests(data) {
             html += '</td>';
             html += '<td>';
             html += '<div class="notes-input-wrapper">';
-            html += '<textarea name="notes[' + escapeHtml(testKey) + ']" placeholder="Notes (drag &amp; drop images)" class="notes-input notes-textarea" rows="1"></textarea>';
+            html += '<div class="bbcode-toolbar">';
+            html += '<button type="button" class="bbcode-btn" data-tag="b" title="Bold [b][/b]"><b>B</b></button>';
+            html += '<button type="button" class="bbcode-btn" data-tag="i" title="Italic [i][/i]"><i>I</i></button>';
+            html += '<button type="button" class="bbcode-btn" data-tag="u" title="Underline [u][/u]"><u>U</u></button>';
+            html += '<button type="button" class="bbcode-btn" data-tag="code" title="Code [code][/code]">&#x27E8;&#x27E9;</button>';
+            html += '<button type="button" class="bbcode-btn" data-tag="url" title="Link [url=][/url]">&#x1F517;</button>';
+            html += '<button type="button" class="bbcode-btn" data-tag="img" title="Image [img][/img]">&#x1F5BC;</button>';
+            html += '</div>';
+            html += '<textarea name="notes[' + escapeHtml(testKey) + ']" placeholder="Notes (BBCode, markdown, drag &amp; drop images)" class="notes-input notes-textarea" rows="1"></textarea>';
             html += '<div class="notes-image-preview" style="display: none;"></div>';
             html += '</div>';
             html += '</td>';
@@ -843,6 +892,7 @@ function renderTests(data) {
 
     // Re-initialize event listeners for dynamically created elements
     initStatusSelectListeners();
+    initBBCodeToolbar();
     initNotesImageDragDrop();
 }
 
@@ -853,6 +903,88 @@ function initStatusSelectListeners() {
             this.className = 'status-select ' + this.value.toLowerCase().replace(/ /g, '-');
         });
     });
+}
+
+// ==================== BBCode Toolbar Functions ====================
+
+function initBBCodeToolbar() {
+    document.querySelectorAll('.bbcode-btn').forEach(function(btn) {
+        // Remove existing listeners by cloning
+        var newBtn = btn.cloneNode(true);
+        btn.parentNode.replaceChild(newBtn, btn);
+
+        newBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            var wrapper = this.closest('.notes-input-wrapper');
+            var textarea = wrapper.querySelector('.notes-textarea');
+            var tag = this.dataset.tag;
+
+            if (tag === 'url') {
+                insertBBCodeUrl(textarea);
+            } else if (tag === 'img') {
+                insertBBCodeImg(textarea);
+            } else {
+                insertBBCodeTag(textarea, tag);
+            }
+        });
+    });
+}
+
+function insertBBCodeTag(textarea, tag) {
+    var start = textarea.selectionStart;
+    var end = textarea.selectionEnd;
+    var selectedText = textarea.value.substring(start, end);
+    var before = textarea.value.substring(0, start);
+    var after = textarea.value.substring(end);
+
+    var openTag = '[' + tag + ']';
+    var closeTag = '[/' + tag + ']';
+    var newText = openTag + selectedText + closeTag;
+
+    textarea.value = before + newText + after;
+
+    if (selectedText) {
+        textarea.selectionStart = start + openTag.length;
+        textarea.selectionEnd = start + openTag.length + selectedText.length;
+    } else {
+        textarea.selectionStart = start + openTag.length;
+        textarea.selectionEnd = start + openTag.length;
+    }
+    textarea.focus();
+}
+
+function insertBBCodeUrl(textarea) {
+    var url = prompt('Enter URL:', 'https://');
+    if (!url) return;
+
+    var start = textarea.selectionStart;
+    var end = textarea.selectionEnd;
+    var selectedText = textarea.value.substring(start, end) || 'link text';
+    var before = textarea.value.substring(0, start);
+    var after = textarea.value.substring(end);
+
+    var bbcode = '[url=' + url + ']' + selectedText + '[/url]';
+    textarea.value = before + bbcode + after;
+
+    textarea.selectionStart = start;
+    textarea.selectionEnd = start + bbcode.length;
+    textarea.focus();
+}
+
+function insertBBCodeImg(textarea) {
+    var url = prompt('Enter image URL:', 'https://');
+    if (!url) return;
+
+    var start = textarea.selectionStart;
+    var before = textarea.value.substring(0, start);
+    var after = textarea.value.substring(textarea.selectionEnd);
+
+    var bbcode = '[img]' + url + '[/img]';
+    textarea.value = before + bbcode + after;
+
+    textarea.selectionStart = start + bbcode.length;
+    textarea.selectionEnd = start + bbcode.length;
+    textarea.focus();
 }
 
 // Show template banner with info
@@ -1196,9 +1328,6 @@ function initNotesImageDragDrop() {
 }
 
 function handleNotesImageDrop(textarea, files) {
-    var wrapper = textarea.closest('.notes-input-wrapper');
-    var previewContainer = wrapper.querySelector('.notes-image-preview');
-
     for (var i = 0; i < files.length; i++) {
         var file = files[i];
 
@@ -1207,31 +1336,55 @@ function handleNotesImageDrop(textarea, files) {
             continue;
         }
 
-        // Check file size (max 2MB per image)
-        if (file.size > 2 * 1024 * 1024) {
-            alert('Image "' + file.name + '" is too large. Maximum size is 2MB.');
+        // Check file size (max 5MB per image)
+        if (file.size > 5 * 1024 * 1024) {
+            alert('Image "' + file.name + '" is too large. Maximum size is 5MB.');
             continue;
         }
 
-        // Read file and convert to base64
-        (function(f, ta, pc) {
-            var reader = new FileReader();
-            reader.onload = function(e) {
-                var dataUri = e.target.result;
-
-                // Insert image marker at cursor position or end
-                var marker = '{{IMAGE:' + dataUri + '}}';
-                insertTextAtCursor(ta, marker);
-
-                // Auto-expand textarea if needed
-                autoExpandTextarea(ta);
-
-                // Show preview
-                showImagePreview(pc, dataUri, ta, marker);
-            };
-            reader.readAsDataURL(f);
-        })(file, textarea, previewContainer);
+        // Upload to server
+        uploadImageToServer(file, textarea);
     }
+}
+
+function uploadImageToServer(file, textarea) {
+    var formData = new FormData();
+    formData.append('image', file);
+    formData.append('action', 'upload_image');
+
+    // Show uploading indicator
+    var originalPlaceholder = textarea.placeholder;
+    textarea.placeholder = 'Uploading image...';
+    textarea.disabled = true;
+
+    fetch('api/upload_image.php', {
+        method: 'POST',
+        body: formData
+    })
+    .then(function(response) { return response.json(); })
+    .then(function(data) {
+        textarea.placeholder = originalPlaceholder;
+        textarea.disabled = false;
+
+        if (data.success) {
+            // Insert BBCode image with thumbnail linking to full image
+            var bbcode = '[url=' + data.url + '][img]' + data.thumbnail_url + '[/img][/url]';
+            insertTextAtCursor(textarea, bbcode);
+            autoExpandTextarea(textarea);
+
+            // Show preview
+            var wrapper = textarea.closest('.notes-input-wrapper');
+            var previewContainer = wrapper.querySelector('.notes-image-preview');
+            showImagePreviewFromUrl(previewContainer, data.thumbnail_url, data.url, textarea, bbcode);
+        } else {
+            alert('Upload failed: ' + (data.error || 'Unknown error'));
+        }
+    })
+    .catch(function(error) {
+        textarea.placeholder = originalPlaceholder;
+        textarea.disabled = false;
+        alert('Upload failed: ' + error.message);
+    });
 }
 
 function insertTextAtCursor(textarea, text) {
@@ -1262,17 +1415,21 @@ function autoExpandTextarea(textarea) {
 }
 
 function showImagePreview(container, dataUri, textarea, marker) {
+    showImagePreviewFromUrl(container, dataUri, dataUri, textarea, marker);
+}
+
+function showImagePreviewFromUrl(container, thumbnailUrl, fullUrl, textarea, marker) {
     container.style.display = 'flex';
 
     var thumb = document.createElement('div');
     thumb.className = 'notes-image-thumb';
 
     var img = document.createElement('img');
-    img.src = dataUri;
-    img.alt = 'Embedded image';
+    img.src = thumbnailUrl;
+    img.alt = 'Uploaded image';
     img.title = 'Click to view full size';
     img.onclick = function() {
-        openImagePreviewModal(dataUri);
+        window.open(fullUrl, '_blank');
     };
 
     var removeBtn = document.createElement('button');

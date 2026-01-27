@@ -11,14 +11,16 @@ import tokenize
 import keyword
 import configparser
 import hashlib
+import threading
 from datetime import datetime, timedelta
 from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QCheckBox, QStackedWidget, QListWidget,
                              QListWidgetItem, QHBoxLayout, QTextEdit, QMessageBox, QScrollArea, QFrame,
-                             QButtonGroup, QRadioButton, QDialog, QGroupBox, QComboBox, QShortcut)
+                             QButtonGroup, QRadioButton, QDialog, QGroupBox, QComboBox, QShortcut,
+                             QProgressBar, QSizePolicy)
 from PyQt5.QtCore import QDate, QUrl, Qt
-from PyQt5.QtGui import QPixmap, QImage, QDesktopServices, QTextCursor, QColor, QKeySequence
+from PyQt5.QtGui import QPixmap, QImage, QDesktopServices, QTextCursor, QColor, QKeySequence, QTextCharFormat
 from versions import VERSIONS
 
 # Try to import panel integration (optional - only if configured)
@@ -98,6 +100,89 @@ def get_version_notifications_for_display(version_id, commit_hash=None):
     return result
 
 
+def get_version_storage_key(vid, commit_hash=None):
+    """Generate a storage key for version results.
+
+    When commit_hash is provided, returns a composite key for commit-specific storage.
+    When commit_hash is empty/None, returns just the version ID for backward compatibility.
+
+    Args:
+        vid: Version ID (e.g., "Jun2003")
+        commit_hash: Commit hash string (e.g., "abc123...")
+
+    Returns:
+        Storage key string
+    """
+    if commit_hash:
+        return f"{vid}|{commit_hash}"
+    return vid
+
+
+def parse_version_storage_key(storage_key):
+    """Parse a storage key into version ID and commit hash.
+
+    Args:
+        storage_key: Storage key (either 'vid' or 'vid|commit')
+
+    Returns:
+        Tuple of (version_id, commit_hash or None)
+    """
+    if '|' in storage_key:
+        parts = storage_key.split('|', 1)
+        return parts[0], parts[1]
+    return storage_key, None
+
+
+def get_results_for_version(session, vid, commit_hash=None):
+    """Get results for a version, trying commit-specific key first.
+
+    Looks up results by:
+    1. Commit-specific key (vid|commit) if commit_hash is provided
+    2. Falls back to version-only key (vid) for backward compatibility
+
+    Args:
+        session: The session dict containing 'results'
+        vid: Version ID
+        commit_hash: Current commit hash (optional)
+
+    Returns:
+        Results dict for the version, or empty dict if not found
+    """
+    results = session.get('results', {})
+
+    if commit_hash:
+        # Try commit-specific key first
+        key = get_version_storage_key(vid, commit_hash)
+        if key in results:
+            return results[key]
+
+    # Fall back to version-only key (backward compatibility)
+    return results.get(vid, {})
+
+
+def is_version_completed(session, vid, commit_hash=None):
+    """Check if a version is completed for the given commit.
+
+    Args:
+        session: The session dict containing 'completed'
+        vid: Version ID
+        commit_hash: Current commit hash (optional)
+
+    Returns:
+        True if version is completed for the commit, False otherwise
+    """
+    completed = session.get('completed', {})
+
+    if commit_hash:
+        # Try commit-specific key first
+        key = get_version_storage_key(vid, commit_hash)
+        if key in completed:
+            return completed[key]
+
+    # Fall back to version-only key (backward compatibility)
+    return completed.get(vid, False)
+
+
 # QTextEdit subclass that handles pasting images from the clipboard and
 # inserts them as base64-embedded <img> tags so they persist in toHtml().
 class ImageTextEdit(QTextEdit):
@@ -147,7 +232,14 @@ class ImageTextEdit(QTextEdit):
                     out.append(html_lib.escape(tail).replace('\n', '<br>'))
                 html = ''.join(out)
                 try:
-                    self.textCursor().insertHtml(html)
+                    cursor = self.textCursor()
+                    cursor.beginEditBlock()
+                    cursor.insertHtml(html)
+                    # Reset character format to default after inserting code blocks
+                    default_format = QTextCharFormat()
+                    cursor.setCharFormat(default_format)
+                    cursor.endEditBlock()
+                    self.setTextCursor(cursor)
                     return
                 except Exception:
                     pass
@@ -186,7 +278,13 @@ class ImageTextEdit(QTextEdit):
                 img_html = f'<a href="data:image/png;base64,{b64_full}"><img src="data:image/png;base64,{b64_full}" width="{display_w}" height="{display_h}" title="Click to view full size" /></a>'
                 # add a small spacer after image
                 img_html += '<br/>'
-                self.textCursor().insertHtml(img_html)
+                cursor = self.textCursor()
+                cursor.insertHtml(img_html)
+                # Reset character format to default after inserting anchor/image
+                # This prevents subsequent text from inheriting the link styling
+                default_format = QTextCharFormat()
+                cursor.setCharFormat(default_format)
+                self.setTextCursor(cursor)
             except Exception:
                 # fallback to default behaviour
                 super().insertFromMimeData(source)
@@ -254,7 +352,14 @@ class ImageTextEdit(QTextEdit):
         sel = cursor.selection().toPlainText()
         # replace selection with highlighted HTML code block
         block = self.build_code_block(sel)
+        cursor.beginEditBlock()
         cursor.insertHtml(block)
+        # Reset character format to default after code block
+        default_format = QTextCharFormat()
+        cursor.setCharFormat(default_format)
+        cursor.insertText('\n')
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
 
     def _convert_fenced_block_at_cursor(self):
         cursor = self.textCursor()
@@ -270,11 +375,25 @@ class ImageTextEdit(QTextEdit):
         cursor.setPosition(open_idx)
         cursor.setPosition(pos, QTextCursor.KeepAnchor)
         cursor.insertHtml(self.build_code_block(code_text))
+        # Reset character format to default after code block
+        # This prevents the code block styling from bleeding into subsequent text
+        default_format = QTextCharFormat()
+        cursor.setCharFormat(default_format)
+        # Insert a line break with default formatting to ensure clean separation
+        cursor.insertText('\n')
         cursor.endEditBlock()
+        # Update the text cursor in the editor to use the reset format
+        self.setTextCursor(cursor)
+
+    # Unique markers that Qt will preserve as text - used to identify code blocks after toHtml()
+    CODE_MARKER_START = "⟦CODE⟧"
+    CODE_MARKER_END = "⟦/CODE⟧"
 
     def build_code_block(self, code_text):
         highlighted = self.highlight_python(code_text)
-        return f"<pre style=\"{self.CODE_BLOCK_STYLE}\"><code>{highlighted}</code></pre>"
+        # Include unique text markers that Qt preserves - these help identify code blocks
+        # when the HTML is later processed by clean_notes()
+        return f"{self.CODE_MARKER_START}<pre style=\"{self.CODE_BLOCK_STYLE}\"><code>{highlighted}</code></pre>{self.CODE_MARKER_END}"
 
     def highlight_python(self, code_text):
         try:
@@ -355,6 +474,61 @@ TESTS = list(FALLBACK_TESTS)
 STATUS_OPTIONS = ["", "Working", "Semi-working", "Not working", "N/A"]
 
 
+def prepare_notes_for_editor(notes: str) -> str:
+    """
+    Prepare saved notes for display in the Qt editor.
+
+    Converts clean <pre><code> blocks back to styled HTML that Qt can render properly.
+    Also converts {{IMAGE:...}} markers back to inline images.
+
+    Args:
+        notes: Cleaned notes string with <pre><code> blocks
+
+    Returns:
+        HTML suitable for Qt's setHtml()
+    """
+    if not notes:
+        return notes
+
+    # Define the code block style (must match ImageTextEdit.CODE_BLOCK_STYLE)
+    code_block_style = (
+        "background:#111;"
+        "color:#eee;"
+        "font-family:Consolas,'Courier New',monospace;"
+        "font-size:12px;"
+        "line-height:1.4;"
+        "padding:8px;"
+        "border-radius:6px;"
+        "white-space:pre-wrap;"
+    )
+
+    # Convert <pre><code> blocks to styled pre tags for Qt
+    def style_code_block(match):
+        code_content = match.group(1)
+        # Escape is already done, just wrap in styled pre
+        return f'<pre style="{code_block_style}"><code>{code_content}</code></pre>'
+
+    notes = re.sub(
+        r'<pre[^>]*>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>',
+        style_code_block,
+        notes,
+        flags=re.IGNORECASE
+    )
+
+    # Convert {{IMAGE:data:...}} markers back to inline images
+    def restore_image(match):
+        data_uri = match.group(1)
+        return f'<a href="{data_uri}"><img src="{data_uri}" width="125" height="100"/></a>'
+
+    notes = re.sub(
+        r'\{\{IMAGE:(data:image/[^}]+)\}\}',
+        restore_image,
+        notes
+    )
+
+    return notes
+
+
 def convert_old_thumbnail_format(html: str) -> str:
     """
     Convert old thumbnail format to new format in HTML notes.
@@ -415,32 +589,77 @@ def convert_old_thumbnail_format(html: str) -> str:
     return pattern.sub(replace_thumbnail, html)
 
 
+def convert_markdown_code_blocks_to_html(text: str) -> str:
+    """
+    Convert markdown code blocks (```code```) to HTML <pre><code> tags.
+
+    Supports:
+    - ```language\\ncode\\n``` (with language specifier)
+    - ```\\ncode\\n``` (no language)
+    - ```code``` (inline on same line)
+
+    Args:
+        text: Text containing markdown code blocks
+
+    Returns:
+        Text with code blocks converted to HTML
+    """
+    # Match ```language\ncode\n``` or ```code``` patterns
+    # Language is optional, handles \r\n line endings
+    def replace_code_block(match):
+        lang = match.group(1) or ''
+        code = match.group(2)
+        # Skip if the content is empty or just whitespace
+        if not code.strip():
+            return match.group(0)
+        # Trim leading/trailing newlines from code content
+        code = code.strip('\r\n')
+        # Escape HTML entities in the code
+        code = html_lib.escape(code)
+        # Build HTML - use data-language attribute for optional language
+        lang_attr = f' data-language="{html_lib.escape(lang)}"' if lang else ''
+        return f'<pre class="code-block"{lang_attr}><code>{code}</code></pre>'
+
+    # Match triple backticks with optional language specifier
+    # Pattern: ```lang\ncode\n``` or ```code```
+    code_block_pattern = r'```(\w*)[\r\n]*([\s\S]*?)```'
+    return re.sub(code_block_pattern, replace_code_block, text)
+
+
 def clean_notes(notes: str) -> str:
     """
     Clean notes text to match PHP's cleanNotes() function.
 
     This converts Qt rich text HTML to plain text/markdown format,
     extracting embedded images and reformatting them.
+    Markdown code blocks (```) are converted to HTML <pre><code> tags.
+    Qt-styled code blocks (with background:#111) are detected and preserved.
 
     The output MUST match PHP's cleanNotes() exactly for hash comparison.
 
     Args:
-        notes: Raw notes string, possibly containing Qt HTML
+        notes: Raw notes string, possibly containing Qt HTML or markdown
 
     Returns:
-        Cleaned notes string
+        Cleaned notes string with code blocks as HTML
     """
     if not notes:
         return ''
 
     # Check if this already looks like markdown (not HTML)
-    # If it has code blocks, image syntax, etc., preserve it as-is
-    if (re.search(r'```[\s\S]*```', notes) or
-        re.search(r'!\[[^\]]*\]\([^)]+\)', notes) or
-        re.search(r'\[image:data:image/', notes) or
-        re.search(r'\{\{IMAGE:data:image/', notes)):
-        # Already markdown-formatted, just clean up Qt CSS
+    # Convert markdown code blocks to HTML before further processing
+    has_markdown_code_blocks = re.search(r'```[\s\S]*?```', notes)
+    has_markdown_images = re.search(r'!\[[^\]]*\]\([^)]+\)', notes)
+    has_image_markers = re.search(r'\[image:data:image/', notes) or re.search(r'\{\{IMAGE:data:image/', notes)
+
+    if has_markdown_code_blocks or has_markdown_images or has_image_markers:
+        # Clean up Qt CSS first
         text = notes.replace('p, li { white-space: pre-wrap; }', '')
+
+        # Convert markdown code blocks (```) to HTML <pre><code> tags
+        if has_markdown_code_blocks:
+            text = convert_markdown_code_blocks_to_html(text)
+
         return text.strip()
 
     # First convert old thumbnail format to new format
@@ -467,32 +686,70 @@ def clean_notes(notes: str) -> str:
             extracted_images.append(img_data)
             seen_images.add(img_data)
 
-    # Convert HTML <pre><code> blocks to markdown code blocks BEFORE stripping tags
-    # This preserves code blocks that were created in the Qt editor
-    extracted_code_blocks = []
+    # IMPORTANT: Qt's toHtml() does NOT preserve <pre><code> tags!
+    # We use unique text markers (⟦CODE⟧ and ⟦/CODE⟧) that Qt preserves as text.
+    # These markers let us identify code blocks even after Qt transforms the HTML.
+    code_blocks = []
+    CODE_MARKER_START = "⟦CODE⟧"
+    CODE_MARKER_END = "⟦/CODE⟧"
 
-    def extract_code_block(match):
-        # Extract code content from <pre><code> block
+    def extract_marked_code_block(match):
+        """Extract code text from marker-delimited code block."""
         code_html = match.group(1)
-        # Strip inner HTML tags (like syntax highlighting spans)
+        # Convert HTML line breaks to newlines BEFORE stripping tags
+        code_html = re.sub(r'<br\s*/?>', '\n', code_html, flags=re.IGNORECASE)
+        # Convert paragraph/div endings to newlines
+        code_html = re.sub(r'</p>\s*<p[^>]*>', '\n', code_html, flags=re.IGNORECASE)
+        code_html = re.sub(r'</div>\s*<div[^>]*>', '\n', code_html, flags=re.IGNORECASE)
+        # Add space between adjacent HTML elements to preserve word spacing
+        # e.g., <span>word1</span><span>word2</span> -> word1 word2
+        code_html = re.sub(r'>\s*<', '> <', code_html)
+        # Strip all HTML tags to get plain text
         code_text = re.sub(r'<[^>]+>', '', code_html)
-        # Decode HTML entities
+        # Decode HTML entities (this also converts &nbsp; to space)
         code_text = html_lib.unescape(code_text)
-        # Store placeholder and actual code
-        placeholder = f"__CODE_BLOCK_{len(extracted_code_blocks)}__"
-        extracted_code_blocks.append(code_text)
+        # Re-escape for safe HTML
+        code_text = html_lib.escape(code_text)
+
+        # Save and return placeholder
+        placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
+        code_blocks.append(f'<pre><code>{code_text}</code></pre>')
         return placeholder
 
-    # Match <pre...><code>...</code></pre> blocks (with optional attributes and whitespace)
+    # Match code blocks by our unique markers (these survive Qt's HTML transformation)
+    # The pattern captures everything between ⟦CODE⟧ and ⟦/CODE⟧
+    notes = re.sub(
+        re.escape(CODE_MARKER_START) + r'([\s\S]*?)' + re.escape(CODE_MARKER_END),
+        extract_marked_code_block,
+        notes
+    )
+
+    # Also check for explicit <pre><code> blocks (in case they come from other sources)
+    def clean_explicit_code_block(match):
+        code_html = match.group(1)
+        # Convert HTML line breaks to newlines BEFORE stripping tags
+        code_html = re.sub(r'<br\s*/?>', '\n', code_html, flags=re.IGNORECASE)
+        # Convert paragraph/div endings to newlines
+        code_html = re.sub(r'</p>\s*<p[^>]*>', '\n', code_html, flags=re.IGNORECASE)
+        code_html = re.sub(r'</div>\s*<div[^>]*>', '\n', code_html, flags=re.IGNORECASE)
+        # Add space between adjacent HTML elements to preserve word spacing
+        code_html = re.sub(r'>\s*<', '> <', code_html)
+        code_text = re.sub(r'<[^>]+>', '', code_html)
+        code_text = html_lib.unescape(code_text)
+        code_text = html_lib.escape(code_text)
+        placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
+        code_blocks.append(f'<pre><code>{code_text}</code></pre>')
+        return placeholder
+
     notes = re.sub(
         r'<pre[^>]*>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>',
-        extract_code_block,
+        clean_explicit_code_block,
         notes,
         flags=re.IGNORECASE
     )
 
     # Handle Qt rich text HTML - convert to plain text
-    # Strip HTML tags
+    # Strip HTML tags (but code blocks are already protected as placeholders)
     text = re.sub(r'<[^>]+>', '', notes)
     # Decode HTML entities
     text = html_lib.unescape(text)
@@ -502,12 +759,10 @@ def clean_notes(notes: str) -> str:
     text = re.sub(r'\bimage\b\s*', '', text, flags=re.IGNORECASE)
     text = text.strip()
 
-    # Replace code block placeholders with markdown code blocks
-    for i, code_text in enumerate(extracted_code_blocks):
+    # Restore code blocks
+    for i, block in enumerate(code_blocks):
         placeholder = f"__CODE_BLOCK_{i}__"
-        # Convert to markdown code block format
-        markdown_block = f"\n```\n{code_text}\n```\n"
-        text = text.replace(placeholder, markdown_block)
+        text = text.replace(placeholder, f"\n{block}\n")
 
     # Clean up multiple newlines that may result from replacements
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -963,6 +1218,12 @@ class VersionPage(QWidget):
             except Exception:
                 pass
 
+        # Get current commit for commit-specific display
+        try:
+            current_commit = self.controller.intro.get_metadata().get('commit', '')
+        except Exception:
+            current_commit = ''
+
         for v in get_active_versions():
             vid = v['id']
             # Calculate completion percentage using template-filtered tests
@@ -976,7 +1237,8 @@ class VersionPage(QWidget):
                 # Fall back to all tests if API not available
                 test_keys = set(t[0] for t in TESTS)
                 total_tests = len(TESTS)
-            saved_results = self.controller.session.get('results', {}).get(vid, {})
+            # Use commit-specific results lookup
+            saved_results = get_results_for_version(self.controller.session, vid, current_commit)
             completed_tests = sum(1 for tk in test_keys if saved_results.get(tk, {}).get('status', ''))
             pct = int((completed_tests / total_tests * 100)) if total_tests > 0 else 0
 
@@ -985,16 +1247,17 @@ class VersionPage(QWidget):
             item = QListWidgetItem(display_text)
             item.setData(QtCore.Qt.UserRole, vid)  # Store actual version id
 
-            # Check if this version needs retesting (red text)
+            # Check if this version needs retesting (red background with black text)
             if vid in retest_versions:
-                item.setForeground(QColor('#e74c3c'))  # Red text for retests
+                item.setBackground(QColor('#e74c3c'))  # Red background for retests
+                item.setForeground(QColor('#000000'))  # Black text for readability
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
             # Mark completed visually (highlight most recent)
             elif self.controller.last_completed_version == vid:
                 item.setBackground(QColor('#fff3cd'))
-            elif self.controller.session.get('completed', {}).get(vid):
+            elif is_version_completed(self.controller.session, vid, current_commit):
                 item.setBackground(QColor('#d4edda'))  # Light green for completed
                 if pct == 100:
                     item.setForeground(QColor('#155724'))  # Dark green text
@@ -1093,11 +1356,54 @@ class VersionPage(QWidget):
                 "No test results to submit. Please complete some tests first.")
             return
 
+        # Validate commit hash is set
+        commit_hash = meta.get('commit', '').strip()
+        if not commit_hash:
+            QMessageBox.warning(self, "Missing Commit Hash",
+                "A commit revision is required to submit reports.\n\n"
+                "Please set the commit hash on the intro page before submitting.")
+            return
+
+        # Filter out empty reports (no tests with status or notes)
+        empty_versions = []
+        valid_results = {}
+        for storage_key, vid_results in results.items():
+            has_content = False
+            for test_key, test_data in vid_results.items():
+                if isinstance(test_data, dict):
+                    status = test_data.get('status', '').strip()
+                    notes = test_data.get('notes', '').strip()
+                    if status or notes:
+                        has_content = True
+                        break
+            if has_content:
+                valid_results[storage_key] = vid_results
+            else:
+                original_vid, _ = parse_version_storage_key(storage_key)
+                empty_versions.append(original_vid)
+
+        if not valid_results:
+            QMessageBox.warning(self, "No Content",
+                "All reports are empty (no test statuses or notes set).\n\n"
+                "Please set test statuses or add notes before submitting.")
+            return
+
+        if empty_versions:
+            # Warn about empty versions being skipped but continue
+            QMessageBox.information(self, "Empty Reports Skipped",
+                f"The following versions have no test results and will be skipped:\n\n"
+                f"{', '.join(empty_versions)}")
+
+        # Use filtered results for the rest of the upload
+        results = valid_results
+
         # Compute current hashes for all versions
+        # Note: Storage keys may be 'vid' or 'vid|commit' - extract original vid for attached_logs lookup
         version_hashes = {}
-        for vid, vid_results in results.items():
-            vid_logs = attached_logs.get(vid, [])
-            version_hashes[vid] = compute_version_hash(vid_results, vid_logs)
+        for storage_key, vid_results in results.items():
+            original_vid, _ = parse_version_storage_key(storage_key)
+            vid_logs = attached_logs.get(original_vid, [])
+            version_hashes[storage_key] = compute_version_hash(vid_results, vid_logs)
 
         # Find versions that have changed locally (for informational purposes)
         locally_changed = []
@@ -1185,12 +1491,39 @@ class VersionPage(QWidget):
             skip_info = f"\n\n{len(skipped_versions)} version(s) skipped (already up to date on server)."
 
         # Build a filtered session with only versions that need uploading
+        # Include per-version commit tracking (if different commits were used for different versions)
+        # Note: storage_key may be 'vid' or 'vid|commit' - extract original vid for lookups
+        version_commits = self.controller.session.get('version_commits', {})
+        timing = self.controller.session.get('timing', {})
+        completed = self.controller.session.get('completed', {})
+
+        filtered_results = {}
+        filtered_timing = {}
+        filtered_completed = {}
+        filtered_attached_logs = {}
+        filtered_version_commits = {}
+
+        for storage_key in changed_versions:
+            original_vid, commit_from_key = parse_version_storage_key(storage_key)
+            filtered_results[storage_key] = results[storage_key]
+            filtered_timing[storage_key] = timing.get(storage_key, timing.get(original_vid, 0))
+            filtered_completed[storage_key] = completed.get(storage_key, completed.get(original_vid, False))
+            # attached_logs uses plain vid
+            if original_vid in attached_logs:
+                filtered_attached_logs[storage_key] = attached_logs[original_vid]
+            # version_commits - use commit from key if present, else lookup, else meta
+            if commit_from_key:
+                filtered_version_commits[storage_key] = commit_from_key
+            else:
+                filtered_version_commits[storage_key] = version_commits.get(original_vid, meta.get('commit', ''))
+
         filtered_session = {
             'meta': meta,
-            'results': {vid: results[vid] for vid in changed_versions},
-            'timing': {vid: self.controller.session.get('timing', {}).get(vid, 0) for vid in changed_versions},
-            'completed': {vid: self.controller.session.get('completed', {}).get(vid, False) for vid in changed_versions},
-            'attached_logs': {vid: attached_logs.get(vid, []) for vid in changed_versions if vid in attached_logs},
+            'results': filtered_results,
+            'timing': filtered_timing,
+            'completed': filtered_completed,
+            'attached_logs': filtered_attached_logs,
+            'version_commits': filtered_version_commits,
         }
 
         # Write filtered session to a temp file for upload
@@ -1205,13 +1538,14 @@ class VersionPage(QWidget):
         # Store the changed versions so we can update hashes after successful upload
         self.controller._pending_upload_versions = changed_versions
 
-        # Submit to panel
+        # Show progress dialog
+        self.controller._submission_progress = SubmissionProgressDialog(
+            self, len(changed_versions), changed_versions
+        )
+        self.controller._submission_progress.show()
+
+        # Submit to panel (async)
         self.controller.panel.submit_session(filtered_path)
-        QMessageBox.information(self, "Uploading",
-            f"Uploading {len(changed_versions)} changed report(s) to panel...\n\n"
-            f"Versions: {', '.join(changed_versions[:5])}" +
-            (f"\n...and {len(changed_versions) - 5} more" if len(changed_versions) > 5 else "") +
-            skip_info)
 
     def check_retests(self):
         """Manually check for pending retests."""
@@ -1413,6 +1747,206 @@ class AttachmentsDialog(QDialog):
             QMessageBox.warning(self, "Error", f"Failed to delete attachment: {e}")
 
 
+class SubmissionProgressDialog(QDialog):
+    """Dialog showing submission progress with an indeterminate progress bar."""
+
+    def __init__(self, parent=None, version_count=0, versions=None):
+        super().__init__(parent)
+        self.setWindowTitle("Uploading Report")
+        self.setMinimumWidth(400)
+        self.setModal(True)
+        # Remove close button to prevent closing during upload
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
+        self.setup_ui(version_count, versions or [])
+
+    def setup_ui(self, version_count, versions):
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # Status label
+        self.status_label = QLabel(f"Uploading {version_count} report(s) to panel...")
+        self.status_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(self.status_label)
+
+        # Version list (show first few)
+        if versions:
+            version_text = ", ".join(versions[:5])
+            if len(versions) > 5:
+                version_text += f"\n...and {len(versions) - 5} more"
+            version_label = QLabel(version_text)
+            version_label.setStyleSheet("color: #666; font-size: 12px;")
+            version_label.setWordWrap(True)
+            layout.addWidget(version_label)
+
+        # Progress bar (indeterminate)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(0)  # Indeterminate mode
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                background-color: #f0f0f0;
+                height: 20px;
+            }
+            QProgressBar::chunk {
+                background-color: #3498db;
+                border-radius: 4px;
+            }
+        """)
+        layout.addWidget(self.progress_bar)
+
+        # Info label
+        self.info_label = QLabel("Please wait...")
+        self.info_label.setStyleSheet("color: #888; font-size: 11px;")
+        layout.addWidget(self.info_label)
+
+        self.setLayout(layout)
+
+    def set_complete(self, success, message):
+        """Update dialog to show completion status."""
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(100)
+
+        if success:
+            self.status_label.setText("Upload Complete!")
+            self.status_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #27ae60;")
+            self.info_label.setText(message)
+            self.progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #27ae60;
+                    border-radius: 5px;
+                    background-color: #f0f0f0;
+                    height: 20px;
+                }
+                QProgressBar::chunk {
+                    background-color: #27ae60;
+                    border-radius: 4px;
+                }
+            """)
+        else:
+            self.status_label.setText("Upload Failed")
+            self.status_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #e74c3c;")
+            self.info_label.setText(message)
+            self.progress_bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #e74c3c;
+                    border-radius: 5px;
+                    background-color: #f0f0f0;
+                    height: 20px;
+                }
+                QProgressBar::chunk {
+                    background-color: #e74c3c;
+                    border-radius: 4px;
+                }
+            """)
+
+        # Re-enable close button and allow closing
+        self.setWindowFlags(self.windowFlags() | Qt.WindowCloseButtonHint)
+        self.show()  # Refresh window flags
+
+        # Auto-close after delay for success
+        if success:
+            QtCore.QTimer.singleShot(2000, self.accept)
+
+
+class FlagNotificationDialog(QDialog):
+    """Dialog for displaying flag notifications (retest requests or fixed tests)."""
+
+    def __init__(self, parent=None, flag_type='retest', flags=None):
+        super().__init__(parent)
+        self.flag_type = flag_type
+        self.flags = flags or []
+        title = "Retest Requested" if flag_type == 'retest' else "Tests Marked as Fixed"
+        self.setWindowTitle(f"{title} ({len(self.flags)})")
+        self.setMinimumSize(550, 400)
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+
+        text = QTextEdit()
+        text.setReadOnly(True)
+
+        # Build HTML content
+        if self.flag_type == 'retest':
+            header = "<h3>🔄 The following tests need retesting:</h3>"
+            item_color = "#fff3e0"  # Light orange
+            border_color = "#ff9800"
+        else:
+            header = "<h3>✅ The following tests have been marked as fixed:</h3>"
+            item_color = "#e8f5e9"  # Light green
+            border_color = "#4caf50"
+
+        html = f"""
+        <style>
+            .flag-item {{ margin-bottom: 15px; padding: 10px; background: {item_color};
+                          border-left: 3px solid {border_color}; border-radius: 5px; }}
+            .flag-header {{ font-weight: bold; font-size: 14px; margin-bottom: 5px; }}
+            .flag-meta {{ font-size: 12px; color: #666; }}
+            .notes {{ background: #fff; padding: 8px; margin-top: 8px; font-size: 12px; border-radius: 3px; }}
+        </style>
+        {header}
+        """
+
+        for flag in self.flags:
+            test_key = flag.get('test_key', 'Unknown')
+            test_name = flag.get('test_name', '')
+            version = flag.get('client_version', 'Unknown')
+            reason = flag.get('reason', '')
+            notes = flag.get('notes', '')
+            report_id = flag.get('report_id')
+
+            icon = "🔄" if self.flag_type == 'retest' else "✅"
+            html += f'<div class="flag-item">'
+            html += f'<div class="flag-header">{icon} Test {test_key}'
+            if test_name:
+                html += f': {test_name}'
+            html += '</div>'
+            html += f'<div class="flag-meta">'
+            html += f'Version: {version}'
+            if reason:
+                html += f'<br>Reason: {reason}'
+            if report_id:
+                html += f'<br>Report ID: #{report_id}'
+            html += '</div>'
+
+            if notes:
+                html += '<div class="notes">'
+                notes_escaped = notes.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                notes_html = notes_escaped.replace('\n', '<br>')
+                html += f'📝 <b>Notes:</b> {notes_html}'
+                html += '</div>'
+
+            html += '</div>'
+
+        text.setHtml(html)
+        layout.addWidget(text)
+
+        # Add acknowledge button
+        button_layout = QHBoxLayout()
+        ack_button = QPushButton("Acknowledge")
+        ack_button.clicked.connect(self.accept)
+        ack_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                padding: 8px 20px;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        button_layout.addStretch()
+        button_layout.addWidget(ack_button)
+        layout.addLayout(button_layout)
+
+
 class VersionNotificationsDialog(QDialog):
     """Dialog for displaying version notifications/known issues when starting tests."""
 
@@ -1550,6 +2084,11 @@ class TestPage(QWidget):
         self.attach_log_btn.setToolTip("Find and attach test log files for this version")
         self.attach_log_btn.clicked.connect(self.attach_log)
 
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setStyleSheet("background-color:#95a5a6;color:white;")
+        self.cancel_btn.setToolTip("Discard changes and return to main menu")
+        self.cancel_btn.clicked.connect(self.cancel_test)
+
         self.finish_btn = QPushButton("Finish Test")
         self.finish_btn.clicked.connect(self.finish)
         hl.addWidget(self.stopwatch_label)
@@ -1559,6 +2098,7 @@ class TestPage(QWidget):
         hl.addStretch()
         hl.addWidget(self.view_attachments_btn)
         hl.addWidget(self.attach_log_btn)
+        hl.addWidget(self.cancel_btn)
         hl.addWidget(self.finish_btn)
         layout.addLayout(hl)
         self.setLayout(layout)
@@ -1671,15 +2211,21 @@ class TestPage(QWidget):
             self.test_frames.append(frame)  # Store frame reference for highlighting
             self.entries.append((tnum, group, notes))
         self.form.addStretch()
-        # populate if existing
-        saved = self.controller.session.get('results', {}).get(version['id'], {})
+        # populate if existing - use commit-specific lookup
+        try:
+            current_commit = self.controller.intro.get_metadata().get('commit', '')
+        except Exception:
+            current_commit = ''
+        saved = get_results_for_version(self.controller.session, version['id'], current_commit)
         for tnum, group, notes in self.entries:
             r = saved.get(tnum, {})
             if r:
                 status = r.get('status', '')
-                # notes are stored as HTML (may include embedded images)
-                # convert old thumbnail format (separate thumb image) to new format (resized full image)
-                notes_html = convert_old_thumbnail_format(r.get('notes', ''))
+                # Notes are stored in cleaned format with <pre><code> blocks
+                # Convert to styled HTML for Qt display, handle old thumbnail format too
+                notes_html = r.get('notes', '')
+                notes_html = convert_old_thumbnail_format(notes_html)
+                notes_html = prepare_notes_for_editor(notes_html)
                 notes.setHtml(notes_html)
                 if status:
                     for b in group.buttons():
@@ -1847,22 +2393,70 @@ class TestPage(QWidget):
     def finish(self):
         # collect
         results = {}
+        has_content = False
         for tnum, group, notes in self.entries:
             checked = group.checkedButton()
             status = checked.text() if checked else ''
-            # save notes as HTML so embedded images are preserved
-            results[tnum] = {'status': status, 'notes': notes.toHtml()}
+            # Clean notes immediately when saving - this converts code block markers
+            # to proper <pre><code> format and preserves embedded images
+            cleaned_notes = clean_notes(notes.toHtml())
+            results[tnum] = {'status': status, 'notes': cleaned_notes}
+            # Check if this test has any content
+            if status or cleaned_notes.strip():
+                has_content = True
+
+        # If no tests have status or notes, discard the report silently
+        if not has_content:
+            QMessageBox.information(
+                self,
+                "Empty Report",
+                "No test results or notes were entered.\nThe report has been discarded."
+            )
+            self.controller.show_versions()
+            return
+
         vid = self.controller.current_version['id']
+
+        # Get current commit for commit-specific storage
+        try:
+            current_commit = self.controller.intro.get_metadata().get('commit', '')
+        except Exception:
+            current_commit = ''
+
+        # Generate commit-specific storage key
+        storage_key = get_version_storage_key(vid, current_commit)
+
         if 'results' not in self.controller.session:
             self.controller.session['results'] = {}
-        self.controller.session['results'][vid] = results
-        # mark completed
+        self.controller.session['results'][storage_key] = results
+
+        # mark completed with commit-specific key
         if 'completed' not in self.controller.session:
             self.controller.session['completed'] = {}
-        self.controller.session['completed'][vid] = True
-        self.controller.last_completed_version = vid
+        self.controller.session['completed'][storage_key] = True
+        self.controller.last_completed_version = vid  # Keep as vid for list highlighting
+
+        # Track which commit was used for this version (for reference)
+        if 'version_commits' not in self.controller.session:
+            self.controller.session['version_commits'] = {}
+        if current_commit:
+            self.controller.session['version_commits'][vid] = current_commit
+
         self.controller.save_session()
         self.controller.show_versions()
+
+    def cancel_test(self):
+        """Discard changes and return to main menu (version list)."""
+        # Ask for confirmation if any changes were made
+        reply = QMessageBox.question(
+            self,
+            "Cancel Test",
+            "Are you sure you want to discard any changes and return to the main menu?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.controller.show_versions()
 
     # ==================== Keyboard Navigation Methods ====================
 
@@ -1963,6 +2557,9 @@ class Controller:
         # Track versions pending upload (for hash update after success)
         self._pending_upload_versions = []
 
+        # Cache for version-specific tests (loaded during navigation, cleared on submission)
+        self._version_tests_cache = {}
+
         self.last_completed_version = None
         self.intro = IntroPage()
         # wire intro restart button to controller restart handler
@@ -2010,19 +2607,12 @@ class Controller:
 
         # Start panel monitoring if configured (checks on startup + every 10 min)
         if self.panel and self.panel.is_configured:
-            # Load tests from API when panel is configured
-            self._load_tests_from_api()
+            # Load tests from API asynchronously (non-blocking)
+            # The callback handles offline mode check and starts monitoring
+            self._load_tests_from_api_async(is_startup=True)
 
-            # Load client versions from API (includes notifications)
-            self._load_versions_from_api()
-
-            # Show offline mode warning if API is not reachable
-            if self.offline_mode:
-                self._show_offline_mode_dialog()
-            else:
-                # Only start monitoring and fetch tester name if online
-                self.panel.start_monitoring()
-                self._load_tester_name_from_api()
+            # Load client versions from API asynchronously (non-blocking)
+            self._load_versions_from_api_async()
 
     def _load_settings(self):
         """Load settings from INI file and initialize panel."""
@@ -2058,6 +2648,9 @@ class Controller:
                 # Connect signals
                 self.panel.retest_notification.connect(self._on_retests_found)
                 self.panel.submission_complete.connect(self._on_submission_complete)
+                self.panel.flag_notification.connect(self._on_flag_notification)
+                # Start background flag polling thread
+                self._start_flag_polling()
             except Exception as e:
                 print(f"Panel integration init error: {e}")
                 self.panel = None
@@ -2067,6 +2660,7 @@ class Controller:
                 self.panel = PanelIntegration()
                 self.panel.retest_notification.connect(self._on_retests_found)
                 self.panel.submission_complete.connect(self._on_submission_complete)
+                self.panel.flag_notification.connect(self._on_flag_notification)
             except Exception as e:
                 print(f"Panel integration init error: {e}")
                 self.panel = None
@@ -2104,16 +2698,20 @@ class Controller:
                 return
             # Reconfigure the panel with the new settings (no JSON file needed)
             self.panel.create_config(api_url, api_key, save_to_file=False)
-            # Also reload tests when config changes
-            self._load_tests_from_api()
+            # Also reload tests when config changes (async to avoid UI freeze)
+            self._load_tests_from_api_async()
+            self._load_versions_from_api_async()
         except Exception as e:
             print(f"Error updating panel config: {e}")
 
     def _load_tests_from_api(self):
-        """Load test types from the API and update the global TESTS list.
+        """Load test types from the API and update the global TESTS list (synchronous).
 
         If the API is configured but not reachable, uses cached data if available,
         otherwise falls back to FALLBACK_TESTS. Sets offline_mode accordingly.
+
+        Note: This is the synchronous version. For non-blocking startup, use
+        _load_tests_from_api_async() instead.
         """
         global TESTS
         if not self.panel or not self.panel.is_configured:
@@ -2159,17 +2757,95 @@ class Controller:
             self.offline_mode = True
             return False
 
+    def _load_tests_from_api_async(self, is_startup: bool = False):
+        """Load test types from the API asynchronously (non-blocking).
+
+        Args:
+            is_startup: If True, trigger offline mode check and monitoring after load
+
+        Results are handled via _on_tests_loaded callback.
+        """
+        global TESTS
+        if not self.panel or not self.panel.is_configured:
+            print("Panel not configured, using fallback tests")
+            TESTS = list(FALLBACK_TESTS)
+            self.offline_mode = False
+            return
+
+        # Create callback wrapper to pass is_startup parameter
+        def callback_wrapper(success, result):
+            self._on_tests_loaded(success, result, is_startup=is_startup)
+
+        # Queue async load with callback
+        self.panel.get_tests_async(enabled_only=True, callback=callback_wrapper)
+
+    def _on_tests_loaded(self, success: bool, result, is_startup: bool = False):
+        """Callback handler for async tests loading.
+
+        Args:
+            success: Whether the API call succeeded
+            result: The TestsResult object
+            is_startup: If True, handle offline mode check and start monitoring
+        """
+        global TESTS
+        try:
+            if success and result and hasattr(result, 'success') and result.success and result.tests:
+                # Convert API tests to the same format as FALLBACK_TESTS
+                new_tests = []
+                for test in result.tests:
+                    new_tests.append((
+                        test.test_key,
+                        test.name,
+                        test.description or ''
+                    ))
+                TESTS = new_tests
+
+                # Check if this is cached data (offline mode)
+                if result.error and "cached" in result.error.lower():
+                    print(f"Loaded {len(TESTS)} tests from cache (offline)")
+                    self.offline_mode = True
+                else:
+                    print(f"Loaded {len(TESTS)} tests from API")
+                    self.offline_mode = False
+            else:
+                # No tests available from API or cache
+                error = result.error if hasattr(result, 'error') and result.error else str(result) if result else "Unknown error"
+                print(f"Failed to load tests: {error}, using fallback tests")
+                TESTS = list(FALLBACK_TESTS)
+                self.offline_mode = True
+        except Exception as e:
+            print(f"Error processing tests result: {e}, using fallback tests")
+            TESTS = list(FALLBACK_TESTS)
+            self.offline_mode = True
+
+        # Handle startup-specific actions
+        if is_startup:
+            self._on_startup_tests_loaded()
+
+    def _on_startup_tests_loaded(self):
+        """Called after async tests load at startup to handle offline mode and monitoring."""
+        if self.offline_mode:
+            # Show offline mode warning dialog
+            self._show_offline_mode_dialog()
+        else:
+            # Start monitoring and fetch tester name if online
+            if self.panel and self.panel.is_configured:
+                self.panel.start_monitoring()
+                self._load_tester_name_from_api_async()
+
     def get_tests_list(self):
         """Get the current tests list (from API or fallback)."""
         return TESTS
 
-    def get_tests_for_version(self, version_id: str):
+    def get_tests_for_version(self, version_id: str, force_refresh: bool = False):
         """Get tests for a specific version using version-specific template if assigned.
 
-        Uses cached data when offline if available. Templates now replace skip_tests entirely.
+        Uses in-memory cache to avoid repeated API calls during navigation.
+        Cache is cleared on report submission to get fresh data.
 
         Args:
             version_id: The client version string (e.g., 'secondblob.bin.2004-01-15')
+            force_refresh: If True, bypass cache and fetch fresh data from API
 
         Returns:
             Tuple of (tests_list, None) or (None, None) if not available
@@ -2178,6 +2854,10 @@ class Controller:
         """
         if not self.panel or not self.panel.is_configured:
             return None, None
+
+        # Check in-memory cache first (unless force refresh requested)
+        if not force_refresh and version_id in self._version_tests_cache:
+            return self._version_tests_cache[version_id], None
 
         try:
             result = self.panel.get_tests(enabled_only=True, client_version=version_id)
@@ -2199,6 +2879,9 @@ class Controller:
                 elif is_cached:
                     print(f"Using cached tests for version {version_id} ({len(tests)} tests)")
 
+                # Cache the result for subsequent accesses
+                self._version_tests_cache[version_id] = tests
+
                 # skip_tests is deprecated - templates now control test visibility
                 # Return None for skip_tests for backward compatibility
                 return tests, None
@@ -2206,6 +2889,10 @@ class Controller:
         except Exception as e:
             print(f"Error getting tests for version {version_id}: {e}")
             return None, None
+
+    def clear_version_tests_cache(self):
+        """Clear the in-memory version tests cache. Called after report submission."""
+        self._version_tests_cache = {}
 
     def _load_versions_from_api(self):
         """Load client versions from the API and update the global API_VERSIONS list.
@@ -2271,6 +2958,73 @@ class Controller:
             API_VERSIONS = None
             return False
 
+    def _load_versions_from_api_async(self):
+        """Load client versions from the API asynchronously (non-blocking).
+
+        Results are handled via _on_versions_loaded callback.
+        """
+        global API_VERSIONS
+        if not self.panel or not self.panel.is_configured:
+            print("Panel not configured, using fallback versions from file")
+            API_VERSIONS = None
+            return
+
+        # Queue async load with callback
+        self.panel.get_versions_async(
+            enabled_only=True,
+            include_notifications=True,
+            callback=self._on_versions_loaded
+        )
+
+    def _on_versions_loaded(self, success: bool, result):
+        """Callback handler for async versions loading."""
+        global API_VERSIONS
+        try:
+            if success and result and hasattr(result, 'success') and result.success and result.versions:
+                # Convert API ClientVersion objects to the same format as VERSIONS
+                new_versions = []
+                for v in result.versions:
+                    version_dict = {
+                        'id': v.id,
+                        'packages': v.packages or [],
+                        'steam_date': v.steam_date,
+                        'steam_time': v.steam_time,
+                        'skip_tests': [],  # Deprecated: templates control test visibility
+                        'display_name': v.display_name,
+                        'notifications': []
+                    }
+                    # Add notifications
+                    if v.notifications:
+                        for n in v.notifications:
+                            version_dict['notifications'].append({
+                                'id': n.id,
+                                'name': n.name,
+                                'message': n.message,
+                                'commit_hash': n.commit_hash,
+                                'created_at': n.created_at
+                            })
+                    new_versions.append(version_dict)
+
+                API_VERSIONS = new_versions
+
+                # Check if this is cached data (offline mode)
+                if result.error and "cached" in result.error.lower():
+                    print(f"Loaded {len(API_VERSIONS)} client versions from cache (offline)")
+                else:
+                    print(f"Loaded {len(API_VERSIONS)} client versions from API")
+
+                # Count total notifications
+                total_notifs = sum(len(v.get('notifications', [])) for v in API_VERSIONS)
+                if total_notifs > 0:
+                    print(f"  (includes {total_notifs} version notifications)")
+            else:
+                error = result.error if hasattr(result, 'error') and result.error else str(result) if result else "Unknown error"
+                print(f"Failed to load versions: {error}, using fallback versions from file")
+                API_VERSIONS = None
+        except Exception as e:
+            print(f"Error processing versions result: {e}, using fallback versions from file")
+            API_VERSIONS = None
+
     def _show_offline_mode_dialog(self):
         """Show a dialog informing the user that the tool is in offline mode."""
         msg = QMessageBox(self.window)
@@ -2311,7 +3065,7 @@ class Controller:
         msg.exec_()
 
     def _load_tester_name_from_api(self):
-        """Fetch the tester name and revisions from the API using the configured API key."""
+        """Fetch the tester name and revisions from the API using the configured API key (synchronous)."""
         if not self.panel or not self.panel.is_configured:
             return
         try:
@@ -2329,6 +3083,33 @@ class Controller:
                     print(f"Loaded {len(user_info.revisions)} revisions from API")
         except Exception as e:
             print(f"Error loading user info from API: {e}")
+
+    def _load_tester_name_from_api_async(self):
+        """Fetch the tester name and revisions from the API asynchronously (non-blocking).
+
+        Results are handled via _on_user_info_loaded callback.
+        """
+        if not self.panel or not self.panel.is_configured:
+            return
+
+        # Queue async load with callback
+        self.panel.get_user_info_async(callback=self._on_user_info_loaded)
+
+    def _on_user_info_loaded(self, success: bool, result):
+        """Callback handler for async user info loading."""
+        try:
+            if success and result and hasattr(result, 'success') and result.success:
+                # Set tester name only if field is empty
+                if not self.intro.name_input.text().strip() and result.username:
+                    self.intro.name_input.setText(result.username)
+                    print(f"Loaded tester name from API: {result.username}")
+
+                # Populate revisions dropdown
+                if hasattr(result, 'revisions') and result.revisions:
+                    self.intro.populate_revisions(result.revisions)
+                    print(f"Loaded {len(result.revisions)} revisions from API")
+        except Exception as e:
+            print(f"Error processing user info result: {e}")
 
     def show_versions(self):
         # stop timing when leaving tests page
@@ -2355,10 +3136,12 @@ class Controller:
                 if 'upload_hashes' not in self.session:
                     self.session['upload_hashes'] = {}
 
-                for vid in self._pending_upload_versions:
-                    vid_results = results.get(vid, {})
-                    vid_logs = attached_logs.get(vid, [])
-                    self.session['upload_hashes'][vid] = compute_version_hash(vid_results, vid_logs)
+                for storage_key in self._pending_upload_versions:
+                    vid_results = results.get(storage_key, {})
+                    # Extract original vid for attached_logs lookup (may be 'vid' or 'vid|commit')
+                    original_vid, _ = parse_version_storage_key(storage_key)
+                    vid_logs = attached_logs.get(original_vid, [])
+                    self.session['upload_hashes'][storage_key] = compute_version_hash(vid_results, vid_logs)
 
                 self._pending_upload_versions = []
                 self.save_session()
@@ -2371,14 +3154,94 @@ class Controller:
             except Exception:
                 pass
 
-            QMessageBox.information(self.window, "Upload Complete",
-                f"Report uploaded successfully!\n\n{message}")
+            # Clear version tests cache and refresh data from API asynchronously
+            self.clear_version_tests_cache()
+            self._load_tests_from_api_async()
+            self._load_versions_from_api_async()
+
+            # Update progress dialog to show success
+            if hasattr(self, '_submission_progress') and self._submission_progress:
+                self._submission_progress.set_complete(True, message)
+            else:
+                QMessageBox.information(self.window, "Upload Complete",
+                    f"Report uploaded successfully!\n\n{message}")
         else:
             # Clear pending versions on failure so user can retry
             self._pending_upload_versions = []
 
-            QMessageBox.warning(self.window, "Upload Failed",
-                f"Failed to upload report:\n\n{message}")
+            # Update progress dialog to show failure
+            if hasattr(self, '_submission_progress') and self._submission_progress:
+                self._submission_progress.set_complete(False, message)
+            else:
+                QMessageBox.warning(self.window, "Upload Failed",
+                    f"Failed to upload report:\n\n{message}")
+
+    def _on_flag_notification(self, count, flags):
+        """Handle flag notification signal from panel polling thread."""
+        if count > 0 and flags:
+            # Show notification dialog for each flag type
+            retest_flags = [f for f in flags if f.get('type') == 'retest']
+            fixed_flags = [f for f in flags if f.get('type') == 'fixed']
+
+            if retest_flags:
+                # Show retest notification dialog
+                dialog = FlagNotificationDialog(self.window, 'retest', retest_flags)
+                if dialog.exec_() == QDialog.Accepted:
+                    # User acknowledged - send acknowledgement to server asynchronously
+                    for flag in retest_flags:
+                        try:
+                            self.panel.acknowledge_flag_async('retest', flag.get('id'))
+                        except Exception as e:
+                            print(f"Failed to acknowledge retest flag: {e}")
+
+            if fixed_flags:
+                # Show fixed notification dialog
+                dialog = FlagNotificationDialog(self.window, 'fixed', fixed_flags)
+                if dialog.exec_() == QDialog.Accepted:
+                    # User acknowledged - send acknowledgement to server asynchronously
+                    for flag in fixed_flags:
+                        try:
+                            self.panel.acknowledge_flag_async('fixed', flag.get('id'))
+                        except Exception as e:
+                            print(f"Failed to acknowledge fixed flag: {e}")
+
+    def _start_flag_polling(self):
+        """Start background thread for polling flag notifications."""
+        self._flag_polling_stop = threading.Event()
+        self._flag_polling_thread = threading.Thread(
+            target=self._flag_polling_loop,
+            daemon=True,
+            name="FlagPolling"
+        )
+        self._flag_polling_thread.start()
+
+    def _stop_flag_polling(self):
+        """Stop the background flag polling thread."""
+        if hasattr(self, '_flag_polling_stop'):
+            self._flag_polling_stop.set()
+        if hasattr(self, '_flag_polling_thread') and self._flag_polling_thread.is_alive():
+            self._flag_polling_thread.join(timeout=2.0)
+
+    def _flag_polling_loop(self):
+        """Background thread that polls for flag notifications periodically."""
+        import time
+        poll_interval = 30  # Check every 30 seconds
+
+        while not self._flag_polling_stop.is_set():
+            try:
+                if self.panel and self.panel.is_configured:
+                    result = self.panel.check_flags_lightweight()
+                    if result and result.get('success'):
+                        count = result.get('count', 0)
+                        flags = result.get('flags', [])
+                        if count > 0:
+                            # Emit signal to main thread (Qt signals are thread-safe)
+                            self.panel.flag_notification.emit(count, flags)
+            except Exception as e:
+                print(f"Flag polling error: {e}")
+
+            # Wait for next poll interval or until stop is requested
+            self._flag_polling_stop.wait(poll_interval)
 
     def show_tests_for(self, version):
         # Check for notifications for this version before showing tests
@@ -2630,8 +3493,23 @@ class Controller:
             running_extra = int((datetime.now() - self._timer_start).total_seconds())
 
         # only include versions that were tested/completed or have results saved
-        completed_ids = set(k for k, v in self.session.get('completed', {}).items() if v)
-        saved_ids = set(results.keys())
+        # Note: keys may be 'vid' or 'vid|commit' - extract original vid for matching
+        completed_ids = set()
+        for k, v in self.session.get('completed', {}).items():
+            if v:
+                original_vid, _ = parse_version_storage_key(k)
+                completed_ids.add(original_vid)
+
+        saved_ids = set()
+        # Build a lookup that maps plain vid to results (handles both 'vid' and 'vid|commit' keys)
+        # If multiple commits have results for same vid, we use the first one found (newest is likely last)
+        vid_to_results = {}
+        for k, v in results.items():
+            original_vid, _ = parse_version_storage_key(k)
+            saved_ids.add(original_vid)
+            # Store results for this vid (later keys will overwrite earlier ones)
+            vid_to_results[original_vid] = v
+
         tested_ids = completed_ids | saved_ids
 
         # compute total time across tested versions (include running timer if active)
@@ -2770,7 +3648,7 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
             row_label = ', '.join(packages) if packages else vid
             ver_anchor = anchor_id(vid)
             row = [f'<td class="row-label">{html_lib.escape(row_label)}</td>']
-            saved = results.get(vid, {})
+            saved = vid_to_results.get(vid, {})
             # Get tests applicable to this version (from template)
             version_test_keys = set(t[0] for t in version_tests_cache.get(vid, TESTS))
             for tc in test_cols:
@@ -2827,7 +3705,7 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
             html.append(f"<p class='meta'><strong>Time spent testing:</strong> {self.format_seconds(sec)}</p>")
             html.append('<table>')
             html.append('<tr><th>Test #</th><th>Test</th><th>Expected</th><th>Status</th><th>Notes</th></tr>')
-            saved = results.get(vid, {})
+            saved = vid_to_results.get(vid, {})
             # Use version-specific tests from cache (respects templates)
             version_test_list = version_tests_cache.get(vid, TESTS)
             for tnum, tname, texp in version_test_list:

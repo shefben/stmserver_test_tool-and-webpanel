@@ -1512,6 +1512,51 @@ tr:hover td {
 }
 
 /*** Rich Notes - Code Blocks (Fancy Style) ***/
+/* Server-side generated code blocks (no wrapper) - simpler style */
+pre.code-block:not(.code-block-wrapper pre) {
+  background: #1a1e15;
+  padding: 14px 16px;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #c8d4bc;
+  overflow-x: auto;
+  margin: 12px 0;
+  border: 1px solid #4a5442;
+  border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+pre.code-block:not(.code-block-wrapper pre) code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+  font-family: inherit;
+}
+
+/* Show language label for server-generated code blocks with data-language attribute */
+pre.code-block[data-language]:not(.code-block-wrapper pre)::before {
+  content: attr(data-language);
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  color: #a8b89c;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 3px 10px;
+  margin: -14px -16px 12px -16px;
+  border-bottom: 1px solid #4a5442;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* Hide empty language labels */
+pre.code-block[data-language=""]:not(.code-block-wrapper pre)::before {
+  display: none;
+}
+
+/* Client-side rendered code blocks with wrapper (macOS style) */
 .code-block-wrapper {
   position: relative;
   margin: 12px 0;

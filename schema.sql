@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS reports (
     restored_from INT DEFAULT NULL,
     restored_at DATETIME DEFAULT NULL,
     last_modified DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Last time report or tests were modified',
+    is_archived TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Archived reports do not receive new revisions - new submissions create new reports',
+    archived_at DATETIME DEFAULT NULL COMMENT 'When the report was archived',
     INDEX idx_tester (tester),
     INDEX idx_client_version (client_version),
     INDEX idx_test_type (test_type),
@@ -59,6 +61,10 @@ CREATE TABLE IF NOT EXISTS reports (
 -- Migration: Add content_hash column for deduplication (for existing installations)
 -- ALTER TABLE reports ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64) DEFAULT NULL COMMENT 'SHA256 hash of report content for deduplication' AFTER raw_json;
 -- ALTER TABLE reports ADD INDEX idx_content_hash (content_hash);
+
+-- Migration: Add is_archived column for archiving reports (for existing installations)
+-- ALTER TABLE reports ADD COLUMN IF NOT EXISTS is_archived TINYINT(1) NOT NULL DEFAULT 0 COMMENT 'Archived reports do not receive new revisions - new submissions create new reports' AFTER last_modified;
+-- ALTER TABLE reports ADD COLUMN IF NOT EXISTS archived_at DATETIME DEFAULT NULL COMMENT 'When the report was archived' AFTER is_archived;
 
 -- Test results table
 CREATE TABLE IF NOT EXISTS test_results (
