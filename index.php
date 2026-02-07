@@ -52,7 +52,8 @@ if (!in_array($page, $validPages)) {
 }
 
 // Handle database export download (must run before any HTML output)
-if ($page === 'admin_backup' && isset($_GET['download'])) {
+// Uses POST with selection JSON from the export wizard form
+if ($page === 'admin_backup' && isset($_GET['download']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
     require_once __DIR__ . '/includes/db.php';
     require_once __DIR__ . '/pages/admin_backup.php';
     handle_panel_export();
