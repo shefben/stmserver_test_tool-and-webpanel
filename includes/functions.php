@@ -91,6 +91,11 @@ function convertMarkdownCodeBlocksToHtml($text) {
 function cleanNotes($notes) {
     if (empty($notes)) return '';
 
+    // Repair corrupted image markers from the old \bimage\b filter
+    $notes = preg_replace_callback('/\{\{:data:\/([^}]+)\}\}/', function($m) {
+        return '{{IMAGE:data:image/' . $m[1] . '}}';
+    }, $notes);
+
     // Check if this already looks like markdown (not HTML)
     // Convert markdown code blocks to HTML before further processing
     $hasMarkdownCodeBlocks = preg_match('/```[\s\S]*?```/', $notes);
@@ -109,32 +114,38 @@ function cleanNotes($notes) {
         return trim($text);
     }
 
-    // Extract embedded images from Qt HTML before stripping tags
+    // Replace embedded images IN-PLACE with {{IMAGE:...}} markers to preserve position
     // Qt sends images as: <a href="data:image/png;base64,..."><img src="..."/></a>
-    // Old format had different images for href (full) and src (thumbnail)
-    // New format has same image in both. We deduplicate to only keep full images.
-    $extractedImages = [];
+    // We deduplicate so only the first occurrence of each image is kept
     $seenImages = [];
 
-    // Match anchor tags with data:image hrefs (Qt format) - prefer href as it's the full image
-    if (preg_match_all('/<a\s+[^>]*href=["\']?(data:image\/[^"\'>\s]+)["\']?[^>]*>/i', $notes, $matches)) {
-        foreach ($matches[1] as $dataUri) {
-            if (!in_array($dataUri, $seenImages)) {
-                $extractedImages[] = $dataUri;
-                $seenImages[] = $dataUri;
+    // Match anchor-wrapped images: <a href="data:image/...">...<img .../>...</a>
+    $notes = preg_replace_callback(
+        '/<a\s+[^>]*href=["\']?(data:image\/[^"\'>\s]+)["\']?[^>]*>[\s\S]*?<\/a>/i',
+        function($match) use (&$seenImages) {
+            $dataUri = $match[1];
+            if (in_array($dataUri, $seenImages)) {
+                return '';  // duplicate, remove
             }
-        }
-    }
+            $seenImages[] = $dataUri;
+            return '{{IMAGE:' . $dataUri . '}}';
+        },
+        $notes
+    );
 
-    // Also match img tags with data URIs (only add if not already seen - avoids duplicate thumbnails)
-    if (preg_match_all('/<img\s+[^>]*src=["\']?(data:image\/[^"\'>\s]+)["\']?[^>]*>/i', $notes, $matches)) {
-        foreach ($matches[1] as $dataUri) {
-            if (!in_array($dataUri, $seenImages)) {
-                $extractedImages[] = $dataUri;
-                $seenImages[] = $dataUri;
+    // Match standalone img tags with data URIs (not already captured by anchor replacement)
+    $notes = preg_replace_callback(
+        '/<img\s+[^>]*src=["\']?(data:image\/[^"\'>\s]+)["\']?[^>]*\/?>/i',
+        function($match) use (&$seenImages) {
+            $dataUri = $match[1];
+            if (in_array($dataUri, $seenImages)) {
+                return '';  // duplicate (already captured from anchor)
             }
-        }
-    }
+            $seenImages[] = $dataUri;
+            return '{{IMAGE:' . $dataUri . '}}';
+        },
+        $notes
+    );
 
     // Preserve <pre><code> blocks - clean them up and add proper class for styling
     // Strip syntax highlighting spans from inside but keep the pre/code structure
@@ -168,27 +179,17 @@ function cleanNotes($notes) {
     $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
     // Remove Qt rich text CSS that leaks through
     $text = str_replace('p, li { white-space: pre-wrap; }', '', $text);
-    // Clean up "image" link text that Qt leaves behind
-    $text = preg_replace('/\bimage\b\s*/i', '', $text);
     $text = trim($text);
 
     // Restore code blocks with proper HTML
     foreach ($codeBlocks as $i => $block) {
         $placeholder = "__CODE_BLOCK_{$i}__";
-        $text = str_replace($placeholder, "\n" . $block . "\n", $text);
+        $text = str_replace($placeholder, $block, $text);
     }
 
     // Clean up multiple newlines that may result from replacements
     $text = preg_replace('/\n{3,}/', "\n\n", $text);
     $text = trim($text);
-
-    // Append extracted images in a format the renderer understands
-    if (!empty($extractedImages)) {
-        foreach ($extractedImages as $dataUri) {
-            $text .= "\n\n{{IMAGE:" . $dataUri . "}}";
-        }
-        $text = trim($text);
-    }
 
     return $text;
 }
@@ -557,10 +558,21 @@ function sortKeysRecursive($data) {
  * @return string SHA256 hash hex string
  */
 function computeReportContentHash(array $resultsData, array $attachedLogs = []): string {
+    // Normalize notes to canonical format before hashing.
+    // This strips images and converts code blocks to markdown,
+    // producing identical output regardless of Python/PHP HTML differences.
+    $normalizedResults = [];
+    foreach ($resultsData as $testKey => $testData) {
+        $normalizedResults[$testKey] = [
+            'status' => $testData['status'] ?? '',
+            'notes' => normalizeNotesForHash($testData['notes'] ?? '')
+        ];
+    }
+
     // Create the same structure as Python
     $dataToHash = [
         'logs' => $attachedLogs,
-        'results' => $resultsData
+        'results' => $normalizedResults
     ];
 
     // Sort keys recursively to match Python's sort_keys=True
@@ -573,6 +585,47 @@ function computeReportContentHash(array $resultsData, array $attachedLogs = []):
 
     // Compute SHA256 hash
     return hash('sha256', $jsonStr);
+}
+
+/**
+ * Normalize notes to a canonical format for hash comparison.
+ *
+ * Strips all image data and converts code blocks to markdown so that
+ * Python and PHP produce identical output regardless of HTML formatting
+ * differences. This MUST match Python's normalize_notes_for_hash() exactly.
+ *
+ * @param string $notes Cleaned notes (output of cleanNotes())
+ * @return string Canonical plain text with markdown code blocks, no images
+ */
+function normalizeNotesForHash(string $notes): string {
+    if (empty($notes)) return '';
+
+    // Remove all image markers and image data
+    $text = preg_replace('/\{\{IMAGE:[^}]*\}\}/', '', $notes);
+    // Also remove any corrupted markers from old \bimage\b filter
+    $text = preg_replace('/\{\{:data:\/[^}]*\}\}/', '', $text);
+    // Remove any remaining HTML image/anchor tags with data URIs
+    $text = preg_replace('/<a\s+[^>]*href=["\']?data:image\/[^>]*>[\s\S]*?<\/a>/i', '', $text);
+    $text = preg_replace('/<img\s+[^>]*src=["\']?data:image\/[^>]*\/?>/i', '', $text);
+
+    // Convert HTML code blocks to markdown
+    $text = preg_replace_callback(
+        '/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/i',
+        function($match) {
+            // Decode HTML entities to get raw code text
+            $code = html_entity_decode($match[1], ENT_QUOTES, 'UTF-8');
+            return "```\n" . $code . "\n```";
+        },
+        $text
+    );
+
+    // Strip any remaining HTML tags
+    $text = strip_tags($text);
+    $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
+
+    // Normalize whitespace
+    $text = preg_replace('/\n{3,}/', "\n\n", $text);
+    return trim($text);
 }
 
 // Pagination helper

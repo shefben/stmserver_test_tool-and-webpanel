@@ -12,15 +12,17 @@ import keyword
 import configparser
 import hashlib
 import threading
+import math
 from datetime import datetime, timedelta
 from PyQt5 import QtWidgets, QtCore
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QFileDialog, QCheckBox, QStackedWidget, QListWidget,
                              QListWidgetItem, QHBoxLayout, QTextEdit, QMessageBox, QScrollArea, QFrame,
                              QButtonGroup, QRadioButton, QDialog, QGroupBox, QComboBox, QShortcut,
-                             QProgressBar, QSizePolicy)
-from PyQt5.QtCore import QDate, QUrl, Qt
-from PyQt5.QtGui import QPixmap, QImage, QDesktopServices, QTextCursor, QColor, QKeySequence, QTextCharFormat
+                             QProgressBar, QSizePolicy, QStyledItemDelegate, QStyle)
+from PyQt5.QtCore import QDate, QUrl, Qt, QTimer, QSize
+from PyQt5.QtGui import (QPixmap, QImage, QDesktopServices, QTextCursor, QColor, QKeySequence,
+                          QTextCharFormat, QPalette, QFont, QFontMetrics)
 from versions import VERSIONS
 
 # Try to import panel integration (optional - only if configured)
@@ -133,6 +135,38 @@ def parse_version_storage_key(storage_key):
     return storage_key, None
 
 
+def compute_status_category(saved_results, test_keys):
+    """Determine the overall status category for a version at 100% completion.
+
+    Examines all test statuses (excluding empty and 'N/A') and returns:
+    - 'fully_working' if all are 'Working'
+    - 'not_working' if all are 'Not working'
+    - 'semi_working' for any mix
+    - '' if no countable statuses
+    """
+    statuses = []
+    for tk in test_keys:
+        s = saved_results.get(tk, {}).get('status', '')
+        if s and s != 'N/A':
+            statuses.append(s)
+    if not statuses:
+        return ''
+    if all(s == 'Working' for s in statuses):
+        return 'fully_working'
+    if all(s == 'Not working' for s in statuses):
+        return 'not_working'
+    return 'semi_working'
+
+
+def interpolate_color(c1, c2, t):
+    """Linear interpolation between two QColors. t in [0, 1]."""
+    return QColor(
+        int(c1.red() + (c2.red() - c1.red()) * t),
+        int(c1.green() + (c2.green() - c1.green()) * t),
+        int(c1.blue() + (c2.blue() - c1.blue()) * t),
+    )
+
+
 def get_results_for_version(session, vid, commit_hash=None):
     """Get results for a version, trying commit-specific key first.
 
@@ -187,8 +221,8 @@ def is_version_completed(session, vid, commit_hash=None):
 # inserts them as base64-embedded <img> tags so they persist in toHtml().
 class ImageTextEdit(QTextEdit):
     CODE_BLOCK_STYLE = (
-        "background:#111;"
-        "color:#eee;"
+        "background:#fdf6e3;"
+        "color:#333;"
         "font-family:Consolas,'Courier New',monospace;"
         "font-size:12px;"
         "line-height:1.4;"
@@ -197,11 +231,11 @@ class ImageTextEdit(QTextEdit):
         "white-space:pre-wrap;"
     )
     PY_TOKEN_STYLES = {
-        "keyword": "color:#c678dd;",
-        "string": "color:#98c379;",
-        "comment": "color:#5c6370;font-style:italic;",
-        "number": "color:#d19a66;",
-        "operator": "color:#56b6c2;",
+        "keyword": "color:#8700af;",
+        "string": "color:#2aa198;",
+        "comment": "color:#93a1a1;font-style:italic;",
+        "number": "color:#b58900;",
+        "operator": "color:#d33682;",
     }
 
     def __init__(self, *args, **kwargs):
@@ -349,7 +383,7 @@ class ImageTextEdit(QTextEdit):
         cursor = self.textCursor()
         if not cursor.hasSelection():
             return
-        sel = cursor.selection().toPlainText()
+        sel = cursor.selection().toPlainText().strip('\n\r')
         # replace selection with highlighted HTML code block
         block = self.build_code_block(sel)
         cursor.beginEditBlock()
@@ -357,7 +391,6 @@ class ImageTextEdit(QTextEdit):
         # Reset character format to default after code block
         default_format = QTextCharFormat()
         cursor.setCharFormat(default_format)
-        cursor.insertText('\n')
         cursor.endEditBlock()
         self.setTextCursor(cursor)
 
@@ -370,19 +403,15 @@ class ImageTextEdit(QTextEdit):
         open_idx = text.rfind('```', 0, pos - 3)
         if open_idx == -1:
             return
-        code_text = text[open_idx + 3:pos - 3]
+        code_text = text[open_idx + 3:pos - 3].strip('\n\r')
         cursor.beginEditBlock()
         cursor.setPosition(open_idx)
         cursor.setPosition(pos, QTextCursor.KeepAnchor)
         cursor.insertHtml(self.build_code_block(code_text))
         # Reset character format to default after code block
-        # This prevents the code block styling from bleeding into subsequent text
         default_format = QTextCharFormat()
         cursor.setCharFormat(default_format)
-        # Insert a line break with default formatting to ensure clean separation
-        cursor.insertText('\n')
         cursor.endEditBlock()
-        # Update the text cursor in the editor to use the reset format
         self.setTextCursor(cursor)
 
     # Unique markers that Qt will preserve as text - used to identify code blocks after toHtml()
@@ -397,9 +426,37 @@ class ImageTextEdit(QTextEdit):
 
     def highlight_python(self, code_text):
         try:
-            tokens = tokenize.generate_tokens(io.StringIO(code_text).readline)
+            lines = code_text.split('\n')
+            tokens = list(tokenize.generate_tokens(io.StringIO(code_text).readline))
             out = []
-            for ttype, tstring, _, _, _ in tokens:
+            # Track position in original source to fill gaps with original whitespace
+            prev_row = 1
+            prev_col = 0
+            for ttype, tstring, (srow, scol), (erow, ecol), _ in tokens:
+                if ttype == tokenize.ENDMARKER:
+                    break
+                # Fill gap between previous token end and this token start
+                if srow == prev_row:
+                    gap = scol - prev_col
+                    if gap > 0:
+                        out.append(' ' * gap)
+                else:
+                    # Spans multiple lines - emit newlines and leading whitespace
+                    for r in range(prev_row, srow):
+                        if r == prev_row:
+                            # Rest of the previous line
+                            rest = lines[r - 1][prev_col:]
+                            if rest:
+                                out.append(html_lib.escape(rest))
+                            out.append('\n')
+                        else:
+                            # Full intermediate lines (whitespace-only gap lines)
+                            out.append(html_lib.escape(lines[r - 1]))
+                            out.append('\n')
+                    # Leading whitespace on the token's line
+                    if scol > 0:
+                        leading = lines[srow - 1][:scol]
+                        out.append(html_lib.escape(leading))
                 escaped = html_lib.escape(tstring)
                 style = ""
                 if ttype == tokenize.COMMENT:
@@ -416,6 +473,8 @@ class ImageTextEdit(QTextEdit):
                     out.append(f"<span style=\"{style}\">{escaped}</span>")
                 else:
                     out.append(escaped)
+                prev_row = erow
+                prev_col = ecol
             return ''.join(out)
         except Exception:
             return html_lib.escape(code_text)
@@ -490,10 +549,19 @@ def prepare_notes_for_editor(notes: str) -> str:
     if not notes:
         return notes
 
+    # Repair corrupted image markers from the old \bimage\b filter.
+    # That filter stripped "IMAGE" and "image" from {{IMAGE:data:image/...}},
+    # leaving behind {{:data:/png;...}}. Restore the correct format.
+    notes = re.sub(
+        r'\{\{:data:/([^}]+)\}\}',
+        lambda m: '{{IMAGE:data:image/' + m.group(1) + '}}',
+        notes
+    )
+
     # Define the code block style (must match ImageTextEdit.CODE_BLOCK_STYLE)
     code_block_style = (
-        "background:#111;"
-        "color:#eee;"
+        "background:#fdf6e3;"
+        "color:#333;"
         "font-family:Consolas,'Courier New',monospace;"
         "font-size:12px;"
         "line-height:1.4;"
@@ -503,10 +571,14 @@ def prepare_notes_for_editor(notes: str) -> str:
     )
 
     # Convert <pre><code> blocks to styled pre tags for Qt
+    # Wrap with CODE markers so clean_notes() can find them on re-save
+    CODE_MARKER_START = "⟦CODE⟧"
+    CODE_MARKER_END = "⟦/CODE⟧"
+
     def style_code_block(match):
         code_content = match.group(1)
-        # Escape is already done, just wrap in styled pre
-        return f'<pre style="{code_block_style}"><code>{code_content}</code></pre>'
+        # Escape is already done, just wrap in styled pre with markers
+        return f'{CODE_MARKER_START}<pre style="{code_block_style}"><code>{code_content}</code></pre>{CODE_MARKER_END}'
 
     notes = re.sub(
         r'<pre[^>]*>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>',
@@ -525,6 +597,29 @@ def prepare_notes_for_editor(notes: str) -> str:
         restore_image,
         notes
     )
+
+    # Convert plain newlines to <br> for Qt HTML display.
+    # Code blocks handle their own whitespace via white-space:pre-wrap,
+    # so protect them with placeholders first.
+    code_placeholders = []
+
+    def protect_code(match):
+        idx = len(code_placeholders)
+        code_placeholders.append(match.group(0))
+        return f'__EDITOR_CODE_{idx}__'
+
+    notes = re.sub(
+        re.escape(CODE_MARKER_START) + r'[\s\S]*?' + re.escape(CODE_MARKER_END),
+        protect_code,
+        notes
+    )
+
+    # Convert newlines to <br> for proper Qt display
+    notes = notes.replace('\n', '<br>')
+
+    # Restore code blocks
+    for idx, block in enumerate(code_placeholders):
+        notes = notes.replace(f'__EDITOR_CODE_{idx}__', block)
 
     return notes
 
@@ -589,6 +684,66 @@ def convert_old_thumbnail_format(html: str) -> str:
     return pattern.sub(replace_thumbnail, html)
 
 
+def escape_html_php(text: str) -> str:
+    """
+    Escape HTML matching PHP's htmlspecialchars(ENT_QUOTES, 'UTF-8').
+
+    Python's html.escape() converts ' to &#x27; but PHP uses &#039;.
+    This difference causes hash mismatches between Python and PHP.
+    """
+    result = html_lib.escape(text)
+    return result.replace('&#x27;', '&#039;')
+
+
+def normalize_notes_for_hash(notes: str) -> str:
+    """
+    Normalize notes to a canonical format for hash comparison.
+
+    Strips all image data and converts code blocks to markdown so that
+    Python and PHP produce identical output regardless of HTML formatting
+    differences. This is used by compute_version_hash() to generate
+    hashes that match the PHP server's computeReportContentHash().
+
+    Args:
+        notes: Cleaned notes (output of clean_notes() or cleanNotes())
+
+    Returns:
+        Canonical plain text with markdown code blocks, no images
+    """
+    if not notes:
+        return ''
+
+    # Remove all image markers and image data
+    text = re.sub(r'\{\{IMAGE:[^}]*\}\}', '', notes)
+    # Also remove any corrupted markers from old \bimage\b filter
+    text = re.sub(r'\{\{:data:/[^}]*\}\}', '', text)
+    # Remove any remaining HTML image/anchor tags with data URIs
+    text = re.sub(r'<a\s+[^>]*href=["\']?data:image/[^>]*>[\s\S]*?</a>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<img\s+[^>]*src=["\']?data:image/[^>]*/?>',  '', text, flags=re.IGNORECASE)
+
+    # Convert HTML code blocks to markdown
+    def code_to_markdown(match):
+        code = match.group(1)
+        # Decode HTML entities to get raw code text
+        code = html_lib.unescape(code)
+        return f'```\n{code}\n```'
+
+    text = re.sub(
+        r'<pre[^>]*>\s*<code[^>]*>([\s\S]*?)</code>\s*</pre>',
+        code_to_markdown,
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # Strip any remaining HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    text = html_lib.unescape(text)
+
+    # Normalize whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 def convert_markdown_code_blocks_to_html(text: str) -> str:
     """
     Convert markdown code blocks (```code```) to HTML <pre><code> tags.
@@ -614,10 +769,10 @@ def convert_markdown_code_blocks_to_html(text: str) -> str:
             return match.group(0)
         # Trim leading/trailing newlines from code content
         code = code.strip('\r\n')
-        # Escape HTML entities in the code
-        code = html_lib.escape(code)
+        # Escape HTML entities matching PHP's htmlspecialchars output
+        code = escape_html_php(code)
         # Build HTML - use data-language attribute for optional language
-        lang_attr = f' data-language="{html_lib.escape(lang)}"' if lang else ''
+        lang_attr = f' data-language="{escape_html_php(lang)}"' if lang else ''
         return f'<pre class="code-block"{lang_attr}><code>{code}</code></pre>'
 
     # Match triple backticks with optional language specifier
@@ -646,6 +801,15 @@ def clean_notes(notes: str) -> str:
     if not notes:
         return ''
 
+    # Repair corrupted image markers from the old \bimage\b filter.
+    # That filter stripped "IMAGE" and "image" from {{IMAGE:data:image/...}},
+    # leaving behind {{:data:/png;...}}. Restore the correct format.
+    notes = re.sub(
+        r'\{\{:data:/([^}]+)\}\}',
+        lambda m: '{{IMAGE:data:image/' + m.group(1) + '}}',
+        notes
+    )
+
     # Check if this already looks like markdown (not HTML)
     # Convert markdown code blocks to HTML before further processing
     has_markdown_code_blocks = re.search(r'```[\s\S]*?```', notes)
@@ -666,25 +830,42 @@ def clean_notes(notes: str) -> str:
     # This ensures we only extract the full image, not separate thumbnails
     notes = convert_old_thumbnail_format(notes)
 
-    # Extract embedded images from Qt HTML before stripping tags
+    # Replace embedded images IN-PLACE with {{IMAGE:...}} markers to preserve position
     # Qt sends images as: <a href="data:image/png;base64,..."><img src="..."/></a>
-    # After conversion, href and src are the same (full image), so deduplicate
-    extracted_images = []
+    # We deduplicate so only the first occurrence of each image is kept
     seen_images = set()
 
-    # Match anchor tags with data:image hrefs (Qt format) - prefer href as it's the full image
-    for match in re.finditer(r'<a\s+[^>]*href=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>', notes, re.IGNORECASE):
-        img_data = match.group(1)
-        if img_data not in seen_images:
-            extracted_images.append(img_data)
-            seen_images.add(img_data)
+    def replace_anchor_image(match):
+        """Replace <a href="data:image/..."><img .../></a> with {{IMAGE:...}} marker in-place."""
+        data_uri = match.group(1)
+        if data_uri in seen_images:
+            return ''  # duplicate, remove
+        seen_images.add(data_uri)
+        return '{{IMAGE:' + data_uri + '}}'
 
-    # Also match img tags with data URIs (only add if not already seen from anchor)
-    for match in re.finditer(r'<img\s+[^>]*src=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>', notes, re.IGNORECASE):
-        img_data = match.group(1)
-        if img_data not in seen_images:
-            extracted_images.append(img_data)
-            seen_images.add(img_data)
+    # Match anchor-wrapped images: <a href="data:image/...">...<img .../>...</a>
+    notes = re.sub(
+        r'<a\s+[^>]*href=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>[\s\S]*?</a>',
+        replace_anchor_image,
+        notes,
+        flags=re.IGNORECASE
+    )
+
+    def replace_standalone_image(match):
+        """Replace standalone <img src="data:image/..."/> with {{IMAGE:...}} marker in-place."""
+        data_uri = match.group(1)
+        if data_uri in seen_images:
+            return ''  # duplicate (already captured from anchor)
+        seen_images.add(data_uri)
+        return '{{IMAGE:' + data_uri + '}}'
+
+    # Match standalone img tags with data URIs (not already captured by anchor replacement)
+    notes = re.sub(
+        r'<img\s+[^>]*src=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*/?>',
+        replace_standalone_image,
+        notes,
+        flags=re.IGNORECASE
+    )
 
     # IMPORTANT: Qt's toHtml() does NOT preserve <pre><code> tags!
     # We use unique text markers (⟦CODE⟧ and ⟦/CODE⟧) that Qt preserves as text.
@@ -701,19 +882,20 @@ def clean_notes(notes: str) -> str:
         # Convert paragraph/div endings to newlines
         code_html = re.sub(r'</p>\s*<p[^>]*>', '\n', code_html, flags=re.IGNORECASE)
         code_html = re.sub(r'</div>\s*<div[^>]*>', '\n', code_html, flags=re.IGNORECASE)
-        # Add space between adjacent HTML elements to preserve word spacing
-        # e.g., <span>word1</span><span>word2</span> -> word1 word2
-        code_html = re.sub(r'>\s*<', '> <', code_html)
+        # Add space between adjacent HTML elements on the same line only.
+        # Only collapse horizontal whitespace (spaces/tabs), never newlines,
+        # so line breaks within code blocks are preserved.
+        code_html = re.sub(r'>[ \t]*<', '> <', code_html)
         # Strip all HTML tags to get plain text
         code_text = re.sub(r'<[^>]+>', '', code_html)
         # Decode HTML entities (this also converts &nbsp; to space)
         code_text = html_lib.unescape(code_text)
-        # Re-escape for safe HTML
-        code_text = html_lib.escape(code_text)
+        # Re-escape matching PHP's htmlspecialchars output
+        code_text = escape_html_php(code_text)
 
         # Save and return placeholder
         placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
-        code_blocks.append(f'<pre><code>{code_text}</code></pre>')
+        code_blocks.append(f'<pre class="code-block"><code>{code_text}</code></pre>')
         return placeholder
 
     # Match code blocks by our unique markers (these survive Qt's HTML transformation)
@@ -732,13 +914,14 @@ def clean_notes(notes: str) -> str:
         # Convert paragraph/div endings to newlines
         code_html = re.sub(r'</p>\s*<p[^>]*>', '\n', code_html, flags=re.IGNORECASE)
         code_html = re.sub(r'</div>\s*<div[^>]*>', '\n', code_html, flags=re.IGNORECASE)
-        # Add space between adjacent HTML elements to preserve word spacing
-        code_html = re.sub(r'>\s*<', '> <', code_html)
+        # Only collapse horizontal whitespace between tags, never newlines
+        code_html = re.sub(r'>[ \t]*<', '> <', code_html)
         code_text = re.sub(r'<[^>]+>', '', code_html)
         code_text = html_lib.unescape(code_text)
-        code_text = html_lib.escape(code_text)
+        # Re-escape matching PHP's htmlspecialchars output
+        code_text = escape_html_php(code_text)
         placeholder = f"__CODE_BLOCK_{len(code_blocks)}__"
-        code_blocks.append(f'<pre><code>{code_text}</code></pre>')
+        code_blocks.append(f'<pre class="code-block"><code>{code_text}</code></pre>')
         return placeholder
 
     notes = re.sub(
@@ -760,24 +943,16 @@ def clean_notes(notes: str) -> str:
     text = html_lib.unescape(text)
     # Remove Qt rich text CSS that leaks through
     text = text.replace('p, li { white-space: pre-wrap; }', '')
-    # Clean up "image" link text that Qt leaves behind
-    text = re.sub(r'\bimage\b\s*', '', text, flags=re.IGNORECASE)
     text = text.strip()
 
     # Restore code blocks
     for i, block in enumerate(code_blocks):
         placeholder = f"__CODE_BLOCK_{i}__"
-        text = text.replace(placeholder, f"\n{block}\n")
+        text = text.replace(placeholder, block)
 
     # Clean up multiple newlines that may result from replacements
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
-
-    # Append extracted images in a format the renderer understands
-    if extracted_images:
-        for data_uri in extracted_images:
-            text += "\n\n{{IMAGE:" + data_uri + "}}"
-        text = text.strip()
 
     return text
 
@@ -789,8 +964,9 @@ def compute_version_hash(results_data: dict, attached_logs: list = None) -> str:
     This hash is used for server-side deduplication. The PHP server uses
     the same algorithm, so the hashes MUST match between Python and PHP.
 
-    The notes are cleaned to match PHP's cleanNotes() before hashing,
-    ensuring the hash of the data to be stored is compared.
+    Notes are cleaned then normalized to a canonical format (plain text +
+    markdown code blocks, no images) before hashing. This eliminates all
+    HTML formatting differences between Python and PHP.
 
     Args:
         results_data: The results dict for a single version (test results)
@@ -799,13 +975,14 @@ def compute_version_hash(results_data: dict, attached_logs: list = None) -> str:
     Returns:
         SHA256 hash string of the data
     """
-    # Clean notes to match PHP's cleanNotes() function before hashing
-    # This ensures the hash is computed on the same data that gets stored
+    # Clean notes, then normalize to canonical format for hash comparison.
+    # normalize_notes_for_hash() strips images and converts code blocks
+    # to markdown, producing identical output regardless of HTML differences.
     cleaned_results = {}
     for test_key, test_data in results_data.items():
         cleaned_results[test_key] = {
             'status': test_data.get('status', ''),
-            'notes': clean_notes(test_data.get('notes', ''))
+            'notes': normalize_notes_for_hash(clean_notes(test_data.get('notes', '')))
         }
 
     # Create a deterministic representation of the data
@@ -1170,12 +1347,126 @@ class IntroPage(QWidget):
             'load_from_api': self.load_from_api_cb.isChecked(),
         }
 
+
+class VersionListDelegate(QStyledItemDelegate):
+    """Custom delegate for version list items with status colors and progress backgrounds."""
+
+    # Custom data roles
+    ROLE_PCT = Qt.UserRole + 1
+    ROLE_STATUS_CAT = Qt.UserRole + 2
+    ROLE_NEEDS_RETEST = Qt.UserRole + 3
+
+    # Background colors by percentage range
+    _BG_RANGES = [
+        (0, 0, QColor('#FFFFFF')),
+        (1, 35, QColor('#FFFDE7')),
+        (36, 75, QColor('#F1F8E9')),
+        (76, 99, QColor('#E8F5E9')),
+        (100, 100, QColor('#C8E6C9')),
+    ]
+
+    # Retest animation endpoints
+    _RETEST_COLOR_A = QColor('#FFF9C4')
+    _RETEST_COLOR_B = QColor('#FFCDD2')
+
+    # Status text colors
+    _STATUS_COLORS = {
+        'fully_working': QColor('#1B5E20'),
+        'semi_working': QColor('#F9A825'),
+        'not_working': QColor('#D32F2F'),
+    }
+
+    # Status labels
+    _STATUS_LABELS = {
+        'fully_working': '(Fully Working)',
+        'semi_working': '(Semi-Working)',
+        'not_working': '(Not Working)',
+    }
+
+    def __init__(self, version_page, parent=None):
+        super().__init__(parent)
+        self._version_page = version_page
+
+    def _get_bg_for_pct(self, pct):
+        for lo, hi, color in self._BG_RANGES:
+            if lo <= pct <= hi:
+                return color
+        return QColor('#FFFFFF')
+
+    def paint(self, painter, option, index):
+        painter.save()
+
+        pct = index.data(self.ROLE_PCT) or 0
+        status_cat = index.data(self.ROLE_STATUS_CAT) or ''
+        needs_retest = index.data(self.ROLE_NEEDS_RETEST) or False
+        display_text = index.data(Qt.DisplayRole) or ''
+
+        # --- Background ---
+        is_selected = bool(option.state & QStyle.State_Selected)
+        if is_selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        elif needs_retest:
+            phase = getattr(self._version_page, '_anim_phase', 0.0)
+            bg = interpolate_color(self._RETEST_COLOR_A, self._RETEST_COLOR_B, phase)
+            painter.fillRect(option.rect, bg)
+        else:
+            painter.fillRect(option.rect, self._get_bg_for_pct(pct))
+
+        # --- Font ---
+        font = QFont(option.font)
+        if needs_retest:
+            font.setBold(True)
+        painter.setFont(font)
+        fm = QFontMetrics(font)
+
+        text_rect = option.rect.adjusted(4, 0, -4, 0)
+
+        if is_selected:
+            text_color = option.palette.color(QPalette.HighlightedText)
+            painter.setPen(text_color)
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, display_text)
+        elif pct == 100 and status_cat in self._STATUS_LABELS:
+            # Split: base text + status suffix
+            label = self._STATUS_LABELS[status_cat]
+            # Find where the status label starts in the display text
+            idx = display_text.rfind(label)
+            if idx >= 0:
+                base_text = display_text[:idx]
+                suffix_text = display_text[idx:]
+                # Draw base text in black
+                painter.setPen(QColor('#000000'))
+                painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, base_text)
+                # Draw status suffix in its color
+                base_width = fm.horizontalAdvance(base_text)
+                suffix_rect = text_rect.adjusted(base_width, 0, 0, 0)
+                painter.setPen(self._STATUS_COLORS[status_cat])
+                painter.drawText(suffix_rect, Qt.AlignVCenter | Qt.AlignLeft, suffix_text)
+            else:
+                painter.setPen(QColor('#000000'))
+                painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, display_text)
+        else:
+            painter.setPen(QColor('#000000'))
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, display_text)
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        if size.height() < 28:
+            size.setHeight(28)
+        return size
+
+
 class VersionPage(QWidget):
     def __init__(self, parent=None, controller=None):
         super().__init__(parent)
         self.controller = controller
         layout = QVBoxLayout()
         self.list_widget = QListWidget()
+        self._delegate = VersionListDelegate(self, self.list_widget)
+        self.list_widget.setItemDelegate(self._delegate)
+        self._anim_phase = 0.0
+        self._anim_timer = None
         self.export_btn = QPushButton("Export Results")
         self.reload_btn = QPushButton("Reload session")
         self.upload_btn = QPushButton("Upload to Panel")
@@ -1213,6 +1504,8 @@ class VersionPage(QWidget):
 
     def populate(self):
         self.list_widget.clear()
+        self._stop_retest_animation()
+
         # Get pending retests from panel if available
         retest_versions = set()
         if self.controller.panel and self.controller.panel.is_configured:
@@ -1229,17 +1522,15 @@ class VersionPage(QWidget):
         except Exception:
             current_commit = ''
 
+        has_retests = False
         for v in get_active_versions():
             vid = v['id']
             # Calculate completion percentage using template-filtered tests
-            # Try to get version-specific tests from API/cache
             version_tests, _ = self.controller.get_tests_for_version(vid)
             if version_tests:
-                # Use template-filtered tests
                 test_keys = set(t[0] for t in version_tests)
                 total_tests = len(version_tests)
             else:
-                # Fall back to all tests if API not available
                 test_keys = set(t[0] for t in TESTS)
                 total_tests = len(TESTS)
             # Use commit-specific results lookup
@@ -1247,27 +1538,54 @@ class VersionPage(QWidget):
             completed_tests = sum(1 for tk in test_keys if saved_results.get(tk, {}).get('status', ''))
             pct = int((completed_tests / total_tests * 100)) if total_tests > 0 else 0
 
-            # Build display text with percentage
+            needs_retest = vid in retest_versions
+            if needs_retest:
+                has_retests = True
+
+            # Determine status category at 100%
+            status_cat = ''
+            if pct == 100:
+                status_cat = compute_status_category(saved_results, test_keys)
+
+            # Build display text
             display_text = f"{vid}  [{pct}%]"
+            if pct == 100 and status_cat:
+                label = VersionListDelegate._STATUS_LABELS.get(status_cat, '')
+                if label:
+                    display_text += f"  {label}"
+            if needs_retest:
+                display_text += " \u26A0\uFE0F"
+
             item = QListWidgetItem(display_text)
-            item.setData(QtCore.Qt.UserRole, vid)  # Store actual version id
-
-            # Check if this version needs retesting (red background with black text)
-            if vid in retest_versions:
-                item.setBackground(QColor('#e74c3c'))  # Red background for retests
-                item.setForeground(QColor('#000000'))  # Black text for readability
-                font = item.font()
-                font.setBold(True)
-                item.setFont(font)
-            # Mark completed visually (highlight most recent)
-            elif self.controller.last_completed_version == vid:
-                item.setBackground(QColor('#fff3cd'))
-            elif is_version_completed(self.controller.session, vid, current_commit):
-                item.setBackground(QColor('#d4edda'))  # Light green for completed
-                if pct == 100:
-                    item.setForeground(QColor('#155724'))  # Dark green text
-
+            item.setData(Qt.UserRole, vid)
+            item.setData(VersionListDelegate.ROLE_PCT, pct)
+            item.setData(VersionListDelegate.ROLE_STATUS_CAT, status_cat)
+            item.setData(VersionListDelegate.ROLE_NEEDS_RETEST, needs_retest)
             self.list_widget.addItem(item)
+
+        if has_retests:
+            self._start_retest_animation()
+
+    def _start_retest_animation(self):
+        if self._anim_timer is not None:
+            return
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._tick_retest_animation)
+        self._anim_time = 0.0
+        self._anim_timer.start(50)
+
+    def _stop_retest_animation(self):
+        if self._anim_timer is not None:
+            self._anim_timer.stop()
+            self._anim_timer.deleteLater()
+            self._anim_timer = None
+        self._anim_phase = 0.0
+
+    def _tick_retest_animation(self):
+        self._anim_time += 0.05
+        # Smooth ~6-second oscillation: (sin(t) + 1) / 2
+        self._anim_phase = (math.sin(self._anim_time * 1.05) + 1.0) / 2.0
+        self.list_widget.viewport().update()
 
     def _update_panel_buttons(self):
         """Update panel button states based on availability and pending submissions."""
@@ -1434,12 +1752,11 @@ class VersionPage(QWidget):
         elif meta.get('LAN'):
             test_type = 'LAN'
 
-        tester = meta.get('tester', '')
         commit_hash = meta.get('commit', '')
 
-        # Check with server
+        # Check with server (tester resolved from API key on server side)
         hash_check_result = self.controller.panel.check_hashes(
-            hashes_to_check, tester, test_type, commit_hash
+            hashes_to_check, test_type, commit_hash
         )
 
         if not hash_check_result.success:
@@ -2350,17 +2667,14 @@ class TestPage(QWidget):
             try:
                 # Get test type from metadata
                 test_type = 'WAN' if meta.get('WAN') else 'LAN'
-                tester = meta.get('tester', '')
-
-                if tester:
-                    # Find the report ID for this version
-                    report_id = self.controller.panel.find_report_id(tester, vid, test_type)
-                    if report_id:
-                        self._current_report_id = report_id
-                        # Check if there are any attachments
-                        logs = self.controller.panel.get_report_logs(report_id)
-                        if logs:
-                            show_view_attachments = True
+                # Find the report ID for this version (tester resolved from API key)
+                report_id = self.controller.panel.find_report_id(vid, test_type)
+                if report_id:
+                    self._current_report_id = report_id
+                    # Check if there are any attachments
+                    logs = self.controller.panel.get_report_logs(report_id)
+                    if logs:
+                        show_view_attachments = True
             except Exception:
                 pass
 
@@ -3119,10 +3433,83 @@ class Controller:
     def show_versions(self):
         # stop timing when leaving tests page
         self.stop_timer()
+
+        # Load tested results from API if enabled
+        meta = self.intro.get_metadata()
+        if (meta.get('load_from_api') and
+                meta.get('commit') and
+                self.panel and self.panel.is_configured and
+                not self.offline_mode):
+            self._load_results_from_api(meta)
+
         self.versions.populate()
         # Update panel buttons state
         self.versions._update_panel_buttons()
         self.stack.setCurrentWidget(self.versions)
+
+    def _load_results_from_api(self, meta):
+        """Load previously submitted results from the API into the local session.
+
+        Fetches all reports belonging to the authenticated user (resolved from API key)
+        for the current commit hash, and merges their test results into the local session.
+        Only fills in results that don't already exist locally (doesn't overwrite).
+        """
+        commit_hash = meta.get('commit', '')
+        if not commit_hash:
+            return
+
+        # Build test_type from WAN/LAN flags
+        test_type = ''
+        if meta.get('WAN') and meta.get('LAN'):
+            test_type = 'WAN/LAN'
+        elif meta.get('WAN'):
+            test_type = 'WAN'
+        elif meta.get('LAN'):
+            test_type = 'LAN'
+
+        try:
+            reports = self.panel.get_my_reports_for_commit(commit_hash, test_type)
+        except Exception as e:
+            print(f"Error loading results from API: {e}")
+            return
+
+        if not reports:
+            return
+
+        if 'results' not in self.session:
+            self.session['results'] = {}
+
+        loaded_count = 0
+        for report in reports:
+            client_version = report.get('client_version', '')
+            if not client_version:
+                continue
+
+            report_results = report.get('results', {})
+            if not report_results:
+                continue
+
+            # Use commit-specific storage key
+            storage_key = get_version_storage_key(client_version, commit_hash)
+
+            # Only load if we don't already have local results for this version+commit
+            if storage_key not in self.session['results']:
+                self.session['results'][storage_key] = {}
+
+            existing = self.session['results'][storage_key]
+
+            for test_key, test_data in report_results.items():
+                # Only fill in tests that don't already have local results
+                if test_key not in existing or not existing[test_key].get('status'):
+                    existing[test_key] = {
+                        'status': test_data.get('status', ''),
+                        'notes': test_data.get('notes', ''),
+                    }
+                    loaded_count += 1
+
+        if loaded_count > 0:
+            self.save_session()
+            print(f"Loaded {loaded_count} test result(s) from {len(reports)} API report(s)")
 
     def _on_retests_found(self, retests):
         """Handle retest notification signal from panel."""

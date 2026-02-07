@@ -143,6 +143,13 @@ def clean_notes_for_api(notes: str) -> str:
     if not notes:
         return ''
 
+    # Repair corrupted image markers from the old \bimage\b filter
+    notes = re.sub(
+        r'\{\{:data:/([^}]+)\}\}',
+        lambda m: '{{IMAGE:data:image/' + m.group(1) + '}}',
+        notes
+    )
+
     # Check if this already looks like markdown (not HTML)
     has_markdown_code_blocks = re.search(r'```[\s\S]*?```', notes)
     has_markdown_images = re.search(r'!\[[^\]]*\]\([^)]+\)', notes)
@@ -157,24 +164,42 @@ def clean_notes_for_api(notes: str) -> str:
 
         return text.strip()
 
-    # Extract embedded images from Qt HTML before stripping tags
+    # Replace embedded images IN-PLACE with {{IMAGE:...}} markers to preserve position
     # Qt sends images as: <a href="data:image/png;base64,..."><img src="..."/></a>
-    extracted_images = []
+    # We deduplicate so only the first occurrence of each image is kept
     seen_images = set()
 
-    # Match anchor tags with data:image hrefs (Qt format) - prefer href as it's the full image
-    for match in re.finditer(r'<a\s+[^>]*href=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>', notes, re.IGNORECASE):
-        img_data = match.group(1)
-        if img_data not in seen_images:
-            extracted_images.append(img_data)
-            seen_images.add(img_data)
+    def replace_anchor_image(match):
+        """Replace <a href="data:image/..."><img .../></a> with {{IMAGE:...}} marker in-place."""
+        data_uri = match.group(1)
+        if data_uri in seen_images:
+            return ''  # duplicate, remove
+        seen_images.add(data_uri)
+        return '{{IMAGE:' + data_uri + '}}'
 
-    # Also match img tags with data URIs (only add if not already seen from anchor)
-    for match in re.finditer(r'<img\s+[^>]*src=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>', notes, re.IGNORECASE):
-        img_data = match.group(1)
-        if img_data not in seen_images:
-            extracted_images.append(img_data)
-            seen_images.add(img_data)
+    # Match anchor-wrapped images: <a href="data:image/...">...<img .../>...</a>
+    notes = re.sub(
+        r'<a\s+[^>]*href=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*>[\s\S]*?</a>',
+        replace_anchor_image,
+        notes,
+        flags=re.IGNORECASE
+    )
+
+    def replace_standalone_image(match):
+        """Replace standalone <img src="data:image/..."/> with {{IMAGE:...}} marker in-place."""
+        data_uri = match.group(1)
+        if data_uri in seen_images:
+            return ''  # duplicate (already captured from anchor)
+        seen_images.add(data_uri)
+        return '{{IMAGE:' + data_uri + '}}'
+
+    # Match standalone img tags with data URIs (not already captured by anchor replacement)
+    notes = re.sub(
+        r'<img\s+[^>]*src=["\']?(data:image/[^"\'>\s]+)["\']?[^>]*/?>',
+        replace_standalone_image,
+        notes,
+        flags=re.IGNORECASE
+    )
 
     # IMPORTANT: Qt's toHtml() does NOT preserve <pre><code> tags!
     # We use unique text markers (⟦CODE⟧ and ⟦/CODE⟧) that Qt preserves as text.
@@ -192,8 +217,8 @@ def clean_notes_for_api(notes: str) -> str:
         # Convert paragraph/div endings to newlines
         code_html = re.sub(r'</p>\s*<p[^>]*>', '\n', code_html, flags=re.IGNORECASE)
         code_html = re.sub(r'</div>\s*<div[^>]*>', '\n', code_html, flags=re.IGNORECASE)
-        # Add space between adjacent HTML elements to preserve word spacing
-        code_html = re.sub(r'>\s*<', '> <', code_html)
+        # Only collapse horizontal whitespace between tags, never newlines
+        code_html = re.sub(r'>[ \t]*<', '> <', code_html)
         # Strip all HTML tags to get plain text
         code_text = re.sub(r'<[^>]+>', '', code_html)
         # Decode HTML entities (also converts &nbsp; to space)
@@ -222,8 +247,8 @@ def clean_notes_for_api(notes: str) -> str:
         # Convert paragraph/div endings to newlines
         code_html = re.sub(r'</p>\s*<p[^>]*>', '\n', code_html, flags=re.IGNORECASE)
         code_html = re.sub(r'</div>\s*<div[^>]*>', '\n', code_html, flags=re.IGNORECASE)
-        # Add space between adjacent HTML elements to preserve word spacing
-        code_html = re.sub(r'>\s*<', '> <', code_html)
+        # Only collapse horizontal whitespace between tags, never newlines
+        code_html = re.sub(r'>[ \t]*<', '> <', code_html)
         code_text = re.sub(r'<[^>]+>', '', code_html)
         code_text = html_lib.unescape(code_text)
 
@@ -253,24 +278,16 @@ def clean_notes_for_api(notes: str) -> str:
     text = html_lib.unescape(text)
     # Remove Qt rich text CSS
     text = text.replace('p, li { white-space: pre-wrap; }', '')
-    # Clean up "image" link text that Qt leaves behind
-    text = re.sub(r'\bimage\b\s*', '', text, flags=re.IGNORECASE)
     text = text.strip()
 
     # Restore code blocks (now in markdown format)
     for i, block in enumerate(code_blocks):
         placeholder = f"__CODE_BLOCK_{i}__"
-        text = text.replace(placeholder, f"\n\n{block}\n\n")
+        text = text.replace(placeholder, block)
 
     # Clean up excessive newlines while preserving intentional blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
-
-    # Append extracted images in a format the renderer understands
-    if extracted_images:
-        for data_uri in extracted_images:
-            text += "\n\n{{IMAGE:" + data_uri + "}}"
-        text = text.strip()
 
     return text
 
@@ -1333,10 +1350,13 @@ class TestPanelClient:
         """Remove a pending submission from the queue."""
         return self.cache.remove_pending_submission(submission_id)
 
-    def check_hashes(self, hashes: Dict[str, str], tester: str, test_type: str,
+    def check_hashes(self, hashes: Dict[str, str], test_type: str,
                      commit_hash: Optional[str] = None) -> HashCheckResult:
         """
         Check if report hashes exist on the server.
+
+        The server resolves the tester identity from the API key, so no
+        tester name needs to be sent.
 
         This is used to determine which reports need to be submitted:
         - 'skip': Report exists with matching hash, no need to submit
@@ -1345,7 +1365,6 @@ class TestPanelClient:
 
         Args:
             hashes: Dict mapping version_id to content hash
-            tester: Tester name
             test_type: Test type (WAN, LAN, WAN/LAN)
             commit_hash: Optional commit hash
 
@@ -1355,7 +1374,6 @@ class TestPanelClient:
         try:
             data = {
                 'hashes': hashes,
-                'tester': tester,
                 'test_type': test_type
             }
             if commit_hash:
@@ -1953,12 +1971,13 @@ class TestPanelClient:
             logger.error(f"Error deleting log: {e}")
             return False
 
-    def find_report_id(self, tester: str, client_version: str, test_type: str) -> Optional[int]:
+    def find_report_id(self, client_version: str, test_type: str) -> Optional[int]:
         """
-        Find the report ID for a given tester, client version, and test type.
+        Find the report ID for the authenticated user, client version, and test type.
+
+        The server resolves the tester identity from the API key.
 
         Args:
-            tester: The tester's username
             client_version: The client version ID
             test_type: The test type (WAN or LAN)
 
@@ -1967,7 +1986,7 @@ class TestPanelClient:
         """
         try:
             response = self._make_request('GET', '/api/reports.php', params={
-                'tester': tester,
+                'mine': '1',
                 'version': client_version,
                 'type': test_type,
                 'limit': 1
@@ -1984,6 +2003,42 @@ class TestPanelClient:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error finding report: {e}")
             return None
+
+    def get_my_reports_for_commit(self, commit_hash: str, test_type: str = '') -> List[dict]:
+        """
+        Fetch all reports belonging to the authenticated user for a specific commit.
+
+        Returns reports with full test results included.
+
+        Args:
+            commit_hash: The commit hash to filter by
+            test_type: Optional test type filter (WAN, LAN, WAN/LAN)
+
+        Returns:
+            List of report dicts, each containing 'client_version', 'results', etc.
+        """
+        try:
+            params = {
+                'mine': '1',
+                'commit': commit_hash,
+                'include_results': '1',
+                'limit': 100
+            }
+            if test_type:
+                params['type'] = test_type
+
+            response = self._make_request('GET', '/api/reports.php', params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                return data.get('reports', [])
+
+            logger.warning(f"Failed to fetch reports: HTTP {response.status_code}")
+            return []
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching reports for commit: {e}")
+            return []
 
     @staticmethod
     def compress_log_file(file_path: str) -> dict:

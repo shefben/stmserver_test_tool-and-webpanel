@@ -259,10 +259,9 @@ class ApiWorker(QThread):
 
             elif operation == 'check_hashes':
                 hashes = kwargs.get('hashes')
-                tester = kwargs.get('tester')
                 test_type = kwargs.get('test_type')
                 commit_hash = kwargs.get('commit_hash')
-                result = self._client.check_hashes(hashes, tester, test_type, commit_hash)
+                result = self._client.check_hashes(hashes, test_type, commit_hash)
                 self.hash_check_result.emit(operation_id, result.success, result)
 
             elif operation == 'get_retest_queue':
@@ -271,10 +270,9 @@ class ApiWorker(QThread):
                 self.retests_result.emit(operation_id, True, items)
 
             elif operation == 'find_report_id':
-                tester = kwargs.get('tester')
                 client_version = kwargs.get('client_version')
                 test_type = kwargs.get('test_type')
-                report_id = self._client.find_report_id(tester, client_version, test_type)
+                report_id = self._client.find_report_id(client_version, test_type)
                 self.generic_result.emit(operation_id, report_id is not None, report_id)
 
             else:
@@ -812,14 +810,15 @@ class PanelIntegration(QObject):
 
         self._worker.queue_task('acknowledge_flag', operation_id, flag_type=flag_type, flag_id=flag_id)
 
-    def check_hashes_async(self, hashes: dict, tester: str, test_type: str,
+    def check_hashes_async(self, hashes: dict, test_type: str,
                            commit_hash: str = None, callback: Callable[[bool, Any], None] = None):
         """
         Check report hashes asynchronously (non-blocking).
 
+        The server resolves the tester identity from the API key.
+
         Args:
             hashes: Dict mapping version_id to content hash
-            tester: Tester name
             test_type: Test type (WAN, LAN, WAN/LAN)
             commit_hash: Optional commit hash
             callback: Optional callback function(success, result)
@@ -847,7 +846,6 @@ class PanelIntegration(QObject):
             'check_hashes',
             operation_id,
             hashes=hashes,
-            tester=tester,
             test_type=test_type,
             commit_hash=commit_hash
         )
@@ -1167,10 +1165,12 @@ class PanelIntegration(QObject):
             logger.error(f"Error acknowledging flag: {e}")
             return False
 
-    def check_hashes(self, hashes: dict, tester: str, test_type: str,
+    def check_hashes(self, hashes: dict, test_type: str,
                      commit_hash: str = None):
         """
         Check if report hashes exist on the server.
+
+        The server resolves the tester identity from the API key.
 
         This is used to determine which reports need to be submitted:
         - 'skip': Report exists with matching hash, no need to submit
@@ -1179,7 +1179,6 @@ class PanelIntegration(QObject):
 
         Args:
             hashes: Dict mapping version_id to content hash
-            tester: Tester name
             test_type: Test type (WAN, LAN, WAN/LAN)
             commit_hash: Optional commit hash
 
@@ -1194,7 +1193,7 @@ class PanelIntegration(QObject):
             from api_client import HashCheckResult
             return HashCheckResult(success=False, error="Not configured")
 
-        return self._client.check_hashes(hashes, tester, test_type, commit_hash)
+        return self._client.check_hashes(hashes, test_type, commit_hash)
 
     def get_cached_retests(self) -> List[RetestNotification]:
         """Get the last fetched retests without making a new request."""
@@ -1569,12 +1568,13 @@ class PanelIntegration(QObject):
             logger.error(f"Error deleting log: {e}")
             return False
 
-    def find_report_id(self, tester: str, client_version: str, test_type: str):
+    def find_report_id(self, client_version: str, test_type: str):
         """
-        Find the report ID for a given tester, client version, and test type.
+        Find the report ID for the authenticated user, client version, and test type.
+
+        The server resolves the tester identity from the API key.
 
         Args:
-            tester: The tester's username
             client_version: The client version ID
             test_type: The test type (WAN or LAN)
 
@@ -1590,10 +1590,35 @@ class PanelIntegration(QObject):
             return None
 
         try:
-            return self._client.find_report_id(tester, client_version, test_type)
+            return self._client.find_report_id(client_version, test_type)
         except Exception as e:
             logger.error(f"Error finding report: {e}")
             return None
+
+    def get_my_reports_for_commit(self, commit_hash: str, test_type: str = ''):
+        """
+        Fetch all reports belonging to the authenticated user for a specific commit.
+
+        Args:
+            commit_hash: The commit hash to filter by
+            test_type: Optional test type filter
+
+        Returns:
+            List of report dicts with test results, or empty list on failure
+        """
+        if self._offline_mode:
+            logger.warning("Cannot fetch reports: offline mode is active")
+            return []
+
+        if not self.is_configured:
+            logger.warning("Cannot fetch reports: not configured")
+            return []
+
+        try:
+            return self._client.get_my_reports_for_commit(commit_hash, test_type)
+        except Exception as e:
+            logger.error(f"Error fetching reports for commit: {e}")
+            return []
 
     @staticmethod
     def compress_log_file(file_path: str) -> dict:

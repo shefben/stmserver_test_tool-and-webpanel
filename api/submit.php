@@ -21,8 +21,9 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-// Authenticate via API key
-if (!requireApiAuth()) {
+// Authenticate via API key - returns the username associated with the key
+$authenticatedUser = requireApiAuth();
+if (!$authenticatedUser) {
     http_response_code(401);
     echo json_encode(['error' => 'Invalid or missing API key. Include X-API-Key header.']);
     exit;
@@ -118,6 +119,10 @@ $insertedReports = [];
 $failedReports = [];
 
 foreach ($allReports as $parsed) {
+    // Use the authenticated username as tester (resolved from API key)
+    // This ensures reports are always findable by the API key owner
+    $parsed['tester'] = $authenticatedUser;
+
     // Clean notes before computing hash and batch insert
     $cleanedResults = [];
     foreach ($parsed['results'] as $testKey => $result) {

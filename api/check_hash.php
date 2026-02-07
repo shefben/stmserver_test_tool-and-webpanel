@@ -49,8 +49,9 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-// Authenticate via API key
-if (!requireApiAuth()) {
+// Authenticate via API key - returns the username associated with the key
+$authenticatedUser = requireApiAuth();
+if (!$authenticatedUser) {
     http_response_code(401);
     echo json_encode(['error' => 'Invalid or missing API key. Include X-API-Key header.']);
     exit;
@@ -73,21 +74,11 @@ if (empty($json['hashes']) || !is_array($json['hashes'])) {
     exit;
 }
 
-if (empty($json['tester'])) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Missing "tester" field.']);
-    exit;
-}
-
-if (empty($json['test_type'])) {
-    http_response_code(400);
-    echo json_encode(['error' => 'Missing "test_type" field.']);
-    exit;
-}
-
 $hashes = $json['hashes'];
-$tester = $json['tester'];
-$testType = $json['test_type'];
+// Resolve tester from the authenticated API key - ignore any tester field in the request
+// This ensures we always look up reports belonging to the API key owner
+$tester = $authenticatedUser;
+$testType = $json['test_type'] ?? '';
 $commitHash = $json['commit_hash'] ?? null;
 
 // Initialize database

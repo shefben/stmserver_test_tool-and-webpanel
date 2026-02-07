@@ -18,8 +18,9 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
     exit;
 }
 
-// Authenticate via API key
-if (!requireApiAuth()) {
+// Authenticate via API key - returns the username associated with the key
+$authenticatedUser = requireApiAuth();
+if (!$authenticatedUser) {
     http_response_code(401);
     echo json_encode(['error' => 'Invalid or missing API key. Include X-API-Key header.']);
     exit;
@@ -74,7 +75,15 @@ if ($reportId) {
     $filters = [];
     if (!empty($_GET['version'])) $filters['client_version'] = $_GET['version'];
     if (!empty($_GET['type'])) $filters['test_type'] = $_GET['type'];
-    if (!empty($_GET['tester'])) $filters['tester'] = $_GET['tester'];
+    if (!empty($_GET['commit'])) $filters['commit_hash'] = $_GET['commit'];
+    // mine=1 filters to the authenticated user's reports (resolved from API key)
+    if (!empty($_GET['mine'])) {
+        $filters['tester'] = $authenticatedUser;
+    } elseif (!empty($_GET['tester'])) {
+        $filters['tester'] = $_GET['tester'];
+    }
+
+    $includeResults = !empty($_GET['include_results']);
 
     $reports = $db->getReports($limit, $offset, $filters);
     $total = $db->countReports($filters);
@@ -83,7 +92,7 @@ if ($reportId) {
     $formattedReports = [];
     foreach ($reports as $report) {
         $stats = $db->getReportStats($report['id']);
-        $formattedReports[] = [
+        $formatted = [
             'id' => $report['id'],
             'tester' => $report['tester'],
             'commit_hash' => $report['commit_hash'],
@@ -92,6 +101,21 @@ if ($reportId) {
             'submitted_at' => $report['submitted_at'],
             'stats' => $stats
         ];
+
+        // Optionally include full test results
+        if ($includeResults) {
+            $testResults = $db->getTestResults($report['id']);
+            $formattedResults = [];
+            foreach ($testResults as $result) {
+                $formattedResults[$result['test_key']] = [
+                    'status' => $result['status'],
+                    'notes' => $result['notes'] ?? ''
+                ];
+            }
+            $formatted['results'] = $formattedResults;
+        }
+
+        $formattedReports[] = $formatted;
     }
 
     echo json_encode([

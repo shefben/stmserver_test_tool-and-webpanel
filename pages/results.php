@@ -999,6 +999,11 @@ function truncateNotesCells() {
             /<img[\s>]/i.test(fullContent) ||
             /<svg[\s>]/i.test(fullContent);
 
+        // Check if notes contain code blocks
+        var hasCodeBlocks = /```[\s\S]*?```/.test(fullContent) ||
+            /<pre[\s>]/i.test(fullContent) ||
+            /\[code\]/i.test(fullContent);
+
         // Strip images, code blocks, and HTML tags for display text only
         var displayText = fullContent
             .replace(/\{\{IMAGE:[^}]+\}\}/g, '')           // {{IMAGE:...}}
@@ -1021,8 +1026,8 @@ function truncateNotesCells() {
         } else if (displayText.length === 0) {
             // Content was only images/code blocks
             displayHtml = '<span class="notes-read-more">[View Content]</span>';
-        } else if (hasImages) {
-            // Has text but also contains images - show text with Read More
+        } else if (hasImages || hasCodeBlocks) {
+            // Has text but also contains images or code blocks - show text with Read More
             displayHtml = escapeHtmlChars(displayText) +
                 ' <span class="notes-read-more">... Read More</span>';
         } else {
