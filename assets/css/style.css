@@ -741,6 +741,13 @@ tr:hover td {
 
 /*** Status Colors ***/
 :root {
+  --bg-dark: #3e4637;
+  --bg-card: #4c5844;
+  --bg-accent: #5a6a50;
+  --border: #282e22;
+  --primary: #c4b550;
+  --text: #eff6ee;
+  --text-muted: #a0aa95;
   --status-working: #7ea64b;
   --status-semi: #c4b550;
   --status-broken: #c45050;

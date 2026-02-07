@@ -158,6 +158,11 @@ function cleanNotes($notes) {
         $notes
     );
 
+    // Convert structural HTML elements to newlines before stripping tags
+    // This preserves paragraph breaks, line breaks, and content ordering
+    $notes = preg_replace('/<br\s*\/?>/i', "\n", $notes);
+    $notes = preg_replace('/<\/p>/i', "\n", $notes);
+    $notes = preg_replace('/<\/div>/i', "\n", $notes);
     // Handle Qt rich text HTML - convert to plain text
     $text = strip_tags($notes);
     $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');

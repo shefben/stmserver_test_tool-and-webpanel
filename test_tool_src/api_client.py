@@ -242,7 +242,12 @@ def clean_notes_for_api(notes: str) -> str:
         flags=re.IGNORECASE
     )
 
-    # Strip other HTML tags (code blocks are already protected as placeholders)
+    # Convert structural HTML elements to newlines before stripping tags
+    # This preserves paragraph breaks, line breaks, and content ordering
+    notes = re.sub(r'<br\s*/?>', '\n', notes, flags=re.IGNORECASE)
+    notes = re.sub(r'</p>', '\n', notes, flags=re.IGNORECASE)
+    notes = re.sub(r'</div>', '\n', notes, flags=re.IGNORECASE)
+    # Strip remaining HTML tags (code blocks are already protected as placeholders)
     text = re.sub(r'<[^>]+>', '', notes)
     # Decode HTML entities
     text = html_lib.unescape(text)
@@ -257,7 +262,7 @@ def clean_notes_for_api(notes: str) -> str:
         placeholder = f"__CODE_BLOCK_{i}__"
         text = text.replace(placeholder, f"\n\n{block}\n\n")
 
-    # Clean up multiple newlines
+    # Clean up excessive newlines while preserving intentional blank lines
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = text.strip()
 

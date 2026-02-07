@@ -391,7 +391,6 @@ $versionNotifications = $db->getNotificationsForVersionString(
                             <td class="notes-cell rich-notes" data-full="<?= e($notes) ?>">
                                 <?php if ($notes): ?>
                                     <div class="notes-content"><?= e($notes) ?></div>
-                                    <span class="notes-read-more">... read more</span>
                                 <?php else: ?>
                                     <span class="notes-empty">-</span>
                                 <?php endif; ?>
@@ -606,41 +605,20 @@ $isUserAdmin = isAdmin();
     word-wrap: break-word;
 }
 
-/* Notes cell truncation */
-.notes-cell {
-    position: relative;
+/* Notes cell truncation in tables */
+td.notes-cell .notes-truncated {
+    display: inline;
 }
 
-.notes-cell .notes-content {
-    max-height: 4.5em; /* Approximately 3 lines */
-    overflow: hidden;
-    line-height: 1.5;
-}
-
-.notes-cell.expanded .notes-content {
-    max-height: none;
-    overflow: visible;
-}
-
-.notes-cell .notes-read-more {
-    display: none;
+td.notes-cell .notes-read-more {
     color: #3498db;
     text-decoration: underline;
     cursor: pointer;
-    font-size: 12px;
-    margin-top: 4px;
+    white-space: nowrap;
 }
 
-.notes-cell .notes-read-more:hover {
+td.notes-cell .notes-read-more:hover {
     color: #2980b9;
-}
-
-.notes-cell.truncated .notes-read-more {
-    display: inline-block;
-}
-
-.notes-cell.expanded .notes-read-more {
-    display: none;
 }
 
 /* Template badge in header */
@@ -1581,36 +1559,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 
 });
-
-function initNotesTruncation() {
-    document.querySelectorAll('.notes-cell .notes-content').forEach(function(content) {
-        // Check if content is truncated (scrollHeight > clientHeight)
-        var cell = content.closest('.notes-cell');
-        if (!cell) return;
-
-        // Skip cells that are already expanded (e.g., rich-notes-rendered)
-        if (cell.classList.contains('expanded')) return;
-
-        // Use setTimeout to ensure rendering is complete
-        setTimeout(function() {
-            if (content.scrollHeight > content.clientHeight) {
-                cell.classList.add('truncated');
-            }
-        }, 0);
-    });
-
-    // Handle read more click
-    document.querySelectorAll('.notes-cell .notes-read-more').forEach(function(readMore) {
-        readMore.addEventListener('click', function(e) {
-            e.stopPropagation();
-            var cell = this.closest('.notes-cell');
-            if (cell) {
-                cell.classList.remove('truncated');
-                cell.classList.add('expanded');
-            }
-        });
-    });
-}
 
 function openRetestModal() {
     document.getElementById('retest-modal-test-key').textContent = currentRetestTestKey;
@@ -2712,25 +2660,80 @@ document.head.appendChild(tagStyle);
 </script>
 <?php endif; ?>
 
-<!-- Rich Notes Initialization -->
+<!-- Notes Display Processing -->
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-    // Note: Rich notes (images) are NOT rendered in table cells - only in modals
-    // This keeps the table clean and readable with truncated text
-
-    // Strip image markers from table cell display (but keep raw content in data-full for modal)
-    document.querySelectorAll('.notes-cell.rich-notes .notes-content').forEach(function(contentEl) {
-        var text = contentEl.textContent;
-        // Remove {{IMAGE:...}} markers from display
-        var cleanText = text.replace(/\{\{IMAGE:[^}]+\}\}/g, '').trim();
-        if (cleanText !== text) {
-            contentEl.textContent = cleanText || '(image only)';
-        }
-    });
-
-    // Initialize notes truncation
-    initNotesTruncation();
+    // Process notes cells for table display - truncate and hide images/code
+    // Run after RichNotesRenderer.init() (which runs at 100ms)
+    setTimeout(function() {
+        truncateNotesCells();
+    }, 150);
 });
+
+function truncateNotesCells() {
+    document.querySelectorAll('td.notes-cell.rich-notes').forEach(function(cell) {
+        var fullContent = cell.getAttribute('data-full');
+        if (!fullContent || !fullContent.trim()) return;
+
+        // Check if notes contain any image/svg/img content
+        var hasImages = /\{\{IMAGE:/i.test(fullContent) ||
+            /!\[[^\]]*\]\([^)]+\)/.test(fullContent) ||
+            /\[img\]/i.test(fullContent) ||
+            /<img[\s>]/i.test(fullContent) ||
+            /<svg[\s>]/i.test(fullContent);
+
+        // Strip images, code blocks, and HTML tags for display text only
+        var displayText = fullContent
+            .replace(/\{\{IMAGE:[^}]+\}\}/g, '')           // {{IMAGE:...}}
+            .replace(/```[\s\S]*?```/g, '')                // ```code blocks```
+            .replace(/`[^`]+`/g, '')                       // `inline code`
+            .replace(/!\[[^\]]*\]\([^)]+\)/g, '')          // ![alt](url)
+            .replace(/\[img\][\s\S]*?\[\/img\]/gi, '')     // [img]...[/img]
+            .replace(/\[code\][\s\S]*?\[\/code\]/gi, '')   // [code]...[/code]
+            .replace(/<pre[^>]*>[\s\S]*?<\/pre>/gi, '')    // <pre>...</pre> blocks
+            .replace(/<[^>]+>/g, '')                       // All remaining HTML tags
+            .replace(/\s+/g, ' ')                          // Normalize whitespace
+            .trim();
+
+        // Build the display HTML
+        var displayHtml;
+        if (displayText.length > 90) {
+            displayHtml = '<span class="notes-truncated">' +
+                escapeHtmlChars(displayText.substring(0, 90)) +
+                '</span><span class="notes-read-more">... Read More</span>';
+        } else if (displayText.length === 0) {
+            // Content was only images/code blocks
+            displayHtml = '<span class="notes-read-more">[View Content]</span>';
+        } else if (hasImages) {
+            // Has text but also contains images - show text with Read More
+            displayHtml = escapeHtmlChars(displayText) +
+                ' <span class="notes-read-more">... Read More</span>';
+        } else {
+            displayHtml = escapeHtmlChars(displayText);
+        }
+
+        // Find or create the notes-content element
+        var contentEl = cell.querySelector('.notes-content');
+        if (contentEl) {
+            contentEl.innerHTML = displayHtml;
+        } else {
+            // RichNotesRenderer may have replaced the cell content - recreate structure
+            // But preserve any retest-notes div that might exist
+            var retestNotes = cell.querySelector('.retest-notes');
+            var retestHtml = retestNotes ? retestNotes.outerHTML : '';
+            cell.innerHTML = '<div class="notes-content">' + displayHtml + '</div>' + retestHtml;
+        }
+
+        // Remove classes that RichNotesRenderer may have added
+        cell.classList.remove('rich-notes-rendered', 'expanded');
+    });
+}
+
+function escapeHtmlChars(text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
 </script>
 
 <!-- Test Detail Modal -->
@@ -2931,11 +2934,14 @@ function showTestDetailModal(testKey, testName, expected, status, notes, categor
         // Check if notes have rich content
         if (typeof RichNotesRenderer !== 'undefined' && RichNotesRenderer.hasRichContent(notes)) {
             notesEl.innerHTML = RichNotesRenderer.render(notes);
+            notesEl.classList.add('rich-notes-rendered');
         } else {
             notesEl.textContent = notes;
+            notesEl.classList.remove('rich-notes-rendered');
         }
     } else {
         notesSection.style.display = 'none';
+        notesEl.classList.remove('rich-notes-rendered');
     }
 
     // Set filter link

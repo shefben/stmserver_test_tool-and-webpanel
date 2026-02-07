@@ -763,17 +763,32 @@ const RichNotesRenderer = {
 
     /**
      * Convert HTML <pre><code> blocks to markdown ``` format
-     * This handles legacy data before escaping
+     * and standalone <code> tags to inline backticks.
+     * This handles legacy data before escaping.
      */
     convertHtmlCodeBlocksToMarkdown: function(text) {
-        // Match <pre...><code>...</code></pre> patterns
-        return text.replace(/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi, function(match, code) {
+        // First: Match <pre...><code>...</code></pre> patterns (fenced code blocks)
+        text = text.replace(/<pre[^>]*>\s*<code[^>]*>([\s\S]*?)<\/code>\s*<\/pre>/gi, function(match, code) {
+            // Convert <br> tags to newlines before extracting text content
+            // (Qt rich text and other sources may use <br> instead of \n)
+            code = code.replace(/<br\s*\/?>/gi, '\n');
             // Decode HTML entities in the code
             var temp = document.createElement('div');
             temp.innerHTML = code;
             var decoded = temp.textContent || temp.innerText || '';
             return '```\n' + decoded + '\n```';
         });
+
+        // Second: Convert standalone <code> tags to inline backticks
+        // (these are NOT inside <pre> since those were already converted above)
+        text = text.replace(/<code[^>]*>([\s\S]*?)<\/code>/gi, function(match, code) {
+            var temp = document.createElement('div');
+            temp.innerHTML = code;
+            var decoded = temp.textContent || temp.innerText || '';
+            return '`' + decoded + '`';
+        });
+
+        return text;
     },
 
     /**
@@ -1076,6 +1091,10 @@ const RichNotesRenderer = {
         // Check for inline code
         if (/`[^`]+`/.test(content)) return true;
 
+        // Check for HTML code/pre tags (legacy data)
+        if (/<code[\s>]/i.test(content)) return true;
+        if (/<pre[\s>]/i.test(content)) return true;
+
         // Check for markdown images
         if (/!\[[^\]]*\]\([^)]+\)/.test(content)) return true;
 
@@ -1085,6 +1104,9 @@ const RichNotesRenderer = {
 
         // Check for URLs
         if (/https?:\/\/[^\s]+/.test(content)) return true;
+
+        // Check for BBCode tags
+        if (/\[(b|i|u|code|url|img)\]/i.test(content)) return true;
 
         return false;
     },

@@ -525,7 +525,7 @@ $maxSortOrder = $db->getMaxClientVersionSortOrder();
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0,0,0,0.7);
+    background: rgba(0, 0, 0, 0.75);
     display: flex;
     justify-content: center;
     align-items: center;
@@ -535,40 +535,70 @@ $maxSortOrder = $db->getMaxClientVersionSortOrder();
 .modal-content {
     background: var(--bg-card);
     border-radius: 8px;
-    padding: 20px;
+    padding: 0;
     max-width: 500px;
     width: 90%;
     max-height: 90vh;
     overflow-y: auto;
+    box-shadow: 0 10px 50px rgba(0, 0, 0, 0.6);
+    border-top: solid 2px #899281;
+    border-bottom: solid 2px #292d23;
+    border-left: solid 2px #899281;
+    border-right: solid 2px #292d23;
+    animation: modalSlideIn 0.2s ease-out;
+}
+
+@keyframes modalSlideIn {
+    from {
+        opacity: 0;
+        transform: scale(0.95) translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
 }
 
 .modal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 20px;
+    padding: 15px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-accent);
+    border-radius: 6px 6px 0 0;
 }
 
 .modal-header h3 {
     margin: 0;
+    color: var(--primary);
+    font-size: 18px;
 }
 
 .modal-close {
     background: none;
     border: none;
-    font-size: 24px;
+    font-size: 28px;
     cursor: pointer;
     color: var(--text-muted);
+    padding: 0 8px;
+    line-height: 1;
 }
 
 .modal-close:hover {
-    color: var(--text);
+    color: #c45050;
+}
+
+.modal-content form {
+    padding: 20px;
 }
 
 .modal-actions {
     display: flex;
     gap: 10px;
     justify-content: flex-end;
+    padding: 15px 20px;
+    border-top: 1px solid var(--border);
     margin-top: 20px;
 }
 </style>
