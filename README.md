@@ -1,3 +1,7 @@
+# Credits
+XJR9000 - Python testing tool and idea
+ShefBen - Implemented website and api connectivity
+
 # Steam Emulator Test Panel
 
 A comprehensive testing and reporting system for Steam emulator development, featuring a web-based dashboard, RESTful API, and desktop testing tool.
