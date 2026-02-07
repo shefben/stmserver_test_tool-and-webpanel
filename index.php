@@ -39,6 +39,7 @@ $validPages = [
     'admin_version_notifications',
     'admin_invites',
     'admin_settings',
+    'admin_backup',
     'edit_report',
     'profile',
     'notifications',
@@ -48,6 +49,14 @@ $validPages = [
 // Validate page
 if (!in_array($page, $validPages)) {
     $page = 'dashboard';
+}
+
+// Handle database export download (must run before any HTML output)
+if ($page === 'admin_backup' && isset($_GET['download'])) {
+    require_once __DIR__ . '/includes/db.php';
+    require_once __DIR__ . '/pages/admin_backup.php';
+    handle_panel_export();
+    exit;
 }
 
 // Include the appropriate page

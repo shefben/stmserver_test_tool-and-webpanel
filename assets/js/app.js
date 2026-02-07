@@ -1267,12 +1267,21 @@ document.addEventListener('DOMContentLoaded', function() {
 var GitHubFloatingBox = {
     modal: null,
     currentRevision: null,
+    _box: null,
+    _titleBar: null,
+    _isDragging: false,
+    _dragOffsetX: 0,
+    _dragOffsetY: 0,
+    _STORAGE_KEY: 'github_floating_box_state',
 
     /**
      * Initialize the floating box modal functionality
      */
     init: function() {
         var self = this;
+
+        this._box = document.getElementById('github-floating-box');
+        this._titleBar = document.getElementById('github-floating-box-title');
 
         // Get the modal element
         this.modal = document.getElementById('github-revision-modal');
@@ -1308,6 +1317,145 @@ var GitHubFloatingBox = {
                 self.fetchAndShowRevisionDetails();
             });
         }
+
+        // Minimize button
+        var minimizeBtn = document.getElementById('github-floating-box-minimize');
+        if (minimizeBtn) {
+            minimizeBtn.addEventListener('click', function(e) {
+                e.stopPropagation();
+                self.toggleMinimize();
+            });
+        }
+
+        // Clicking the title bar while minimized restores
+        if (this._titleBar) {
+            this._titleBar.addEventListener('click', function(e) {
+                if (self._box && self._box.classList.contains('minimized') && e.target !== minimizeBtn) {
+                    self.toggleMinimize();
+                }
+            });
+        }
+
+        // Drag handling
+        this._initDrag();
+
+        // Restore saved state
+        this._restoreState();
+    },
+
+    /**
+     * Toggle minimized state
+     */
+    toggleMinimize: function() {
+        if (!this._box) return;
+        var btn = document.getElementById('github-floating-box-minimize');
+        var isMinimized = this._box.classList.toggle('minimized');
+        if (btn) {
+            btn.innerHTML = isMinimized ? '&#43;' : '&#8722;';
+            btn.title = isMinimized ? 'Restore' : 'Minimize';
+        }
+        this._saveState();
+    },
+
+    /**
+     * Initialize drag-by-title-bar
+     */
+    _initDrag: function() {
+        if (!this._titleBar || !this._box) return;
+        var self = this;
+
+        this._titleBar.addEventListener('mousedown', function(e) {
+            // Don't drag if clicking minimize button, or if minimized
+            if (e.target.closest('.github-floating-box-minimize')) return;
+            if (self._box.classList.contains('minimized')) return;
+            e.preventDefault();
+            self._isDragging = true;
+            self._box.classList.add('is-dragging');
+
+            var rect = self._box.getBoundingClientRect();
+            self._dragOffsetX = e.clientX - rect.left;
+            self._dragOffsetY = e.clientY - rect.top;
+        });
+
+        document.addEventListener('mousemove', function(e) {
+            if (!self._isDragging) return;
+            e.preventDefault();
+
+            var x = e.clientX - self._dragOffsetX;
+            var y = e.clientY - self._dragOffsetY;
+
+            // Clamp to viewport
+            var boxW = self._box.offsetWidth;
+            var boxH = self._box.offsetHeight;
+            var maxX = window.innerWidth - boxW;
+            var maxY = window.innerHeight - boxH;
+            x = Math.max(0, Math.min(x, maxX));
+            y = Math.max(0, Math.min(y, maxY));
+
+            self._box.style.left = x + 'px';
+            self._box.style.top = y + 'px';
+            self._box.style.right = 'auto';
+            self._box.style.transform = 'none';
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (!self._isDragging) return;
+            self._isDragging = false;
+            self._box.classList.remove('is-dragging');
+            self._saveState();
+        });
+    },
+
+    /**
+     * Save position and minimized state to localStorage
+     */
+    _saveState: function() {
+        if (!this._box) return;
+        try {
+            var state = {
+                minimized: this._box.classList.contains('minimized')
+            };
+            // Only save position if not minimized (minimized snaps to corner)
+            if (!state.minimized) {
+                state.left = this._box.style.left || '';
+                state.top = this._box.style.top || '';
+                state.right = this._box.style.right || '';
+            }
+            localStorage.setItem(this._STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {}
+    },
+
+    /**
+     * Restore saved state from localStorage
+     */
+    _restoreState: function() {
+        if (!this._box) return;
+        try {
+            var raw = localStorage.getItem(this._STORAGE_KEY);
+            if (!raw) return;
+            var state = JSON.parse(raw);
+
+            if (state.minimized) {
+                this._box.classList.add('minimized');
+                var btn = document.getElementById('github-floating-box-minimize');
+                if (btn) {
+                    btn.innerHTML = '&#43;';
+                    btn.title = 'Restore';
+                }
+            } else if (state.left && state.top) {
+                // Restore dragged position, but clamp to current viewport
+                var left = parseInt(state.left, 10);
+                var top = parseInt(state.top, 10);
+                var boxW = this._box.offsetWidth;
+                var boxH = this._box.offsetHeight;
+                left = Math.max(0, Math.min(left, window.innerWidth - boxW));
+                top = Math.max(0, Math.min(top, window.innerHeight - boxH));
+                this._box.style.left = left + 'px';
+                this._box.style.top = top + 'px';
+                this._box.style.right = 'auto';
+                this._box.style.transform = 'none';
+            }
+        } catch (e) {}
     },
 
     /**

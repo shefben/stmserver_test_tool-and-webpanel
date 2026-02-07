@@ -12,7 +12,9 @@ require_once __DIR__ . '/../includes/auth.php';
 header('Content-Type: application/json');
 
 // Require authentication (session-based for internal use)
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 if (empty($_SESSION['user_id'])) {
     http_response_code(401);
     echo json_encode(['error' => 'Unauthorized']);

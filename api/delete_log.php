@@ -8,8 +8,10 @@ require_once __DIR__ . '/../auth.php';
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/functions.php';
 
-// Start session for web auth
-session_start();
+// Start session for web auth (config.php may have already started it)
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
 header('Content-Type: application/json');
 

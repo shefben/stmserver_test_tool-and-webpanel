@@ -1355,6 +1355,7 @@ class VersionListDelegate(QStyledItemDelegate):
     ROLE_PCT = Qt.UserRole + 1
     ROLE_STATUS_CAT = Qt.UserRole + 2
     ROLE_NEEDS_RETEST = Qt.UserRole + 3
+    ROLE_LAST_COMPLETED = Qt.UserRole + 4
 
     # Background colors by percentage range
     _BG_RANGES = [
@@ -1409,12 +1410,14 @@ class VersionListDelegate(QStyledItemDelegate):
             phase = getattr(self._version_page, '_anim_phase', 0.0)
             bg = interpolate_color(self._RETEST_COLOR_A, self._RETEST_COLOR_B, phase)
             painter.fillRect(option.rect, bg)
+        elif index.data(self.ROLE_LAST_COMPLETED):
+            painter.fillRect(option.rect, QColor('#fff3cd'))
         else:
             painter.fillRect(option.rect, self._get_bg_for_pct(pct))
 
         # --- Font ---
         font = QFont(option.font)
-        if needs_retest:
+        if needs_retest or index.data(self.ROLE_LAST_COMPLETED):
             font.setBold(True)
         painter.setFont(font)
         fm = QFontMetrics(font)
@@ -1561,6 +1564,8 @@ class VersionPage(QWidget):
             item.setData(VersionListDelegate.ROLE_PCT, pct)
             item.setData(VersionListDelegate.ROLE_STATUS_CAT, status_cat)
             item.setData(VersionListDelegate.ROLE_NEEDS_RETEST, needs_retest)
+            item.setData(VersionListDelegate.ROLE_LAST_COMPLETED,
+                         self.controller.last_completed_version == vid)
             self.list_widget.addItem(item)
 
         if has_retests:
@@ -3928,6 +3933,9 @@ class Controller:
                 ".meta{font-size:13px;color:var(--muted);}"
                 ".notes{font-size:13px;line-height:1.35;}"
                 ".notes *{font-size:inherit !important;line-height:inherit;}"
+                ".notes pre{background:#fdf6e3;color:#333;font-family:Consolas,'Courier New',monospace;font-size:12px;line-height:1.4;padding:8px;border-radius:6px;white-space:pre-wrap;overflow-x:auto;margin:6px 0;}"
+                ".notes pre code{font-size:inherit;background:none;padding:0;}"
+                ".notes img{max-width:125px;height:auto;cursor:pointer;border:1px solid var(--border);border-radius:3px;}"
                 "details.version{border:1px solid #e5e5e5;border-radius:6px;padding:10px;margin:12px 0;background:#fafafa;}"
                 "details.version[open]{background:#fff;}"
                 "details.version summary{cursor:pointer;font-weight:600;font-size:15px;list-style:none;}"
@@ -4107,6 +4115,15 @@ document.getElementById('imgModalImg').addEventListener('click', function(){
                 raw_notes = r.get('notes', '') or ''
                 # convert old thumbnail format (separate thumb image) to new format (resized full image)
                 raw_notes = convert_old_thumbnail_format(raw_notes)
+                # Convert markdown code blocks (```) to <pre><code> for HTML export
+                if '```' in raw_notes:
+                    raw_notes = convert_markdown_code_blocks_to_html(raw_notes)
+                # Convert {{IMAGE:data:...}} markers to clickable <img> tags
+                raw_notes = re.sub(
+                    r'\{\{IMAGE:(data:image/[^}]+)\}\}',
+                    lambda m: f'<a href="{m.group(1)}"><img src="{m.group(1)}" width="125" height="100" title="Click to view full size"/></a>',
+                    raw_notes
+                )
                 # if notes appear to already be HTML (contains tags, code blocks, or embedded image), use directly
                 if '<img' in raw_notes or '<pre' in raw_notes or '<code' in raw_notes or '<p' in raw_notes or '<br' in raw_notes or '&lt;' in raw_notes:
                     notes = raw_notes

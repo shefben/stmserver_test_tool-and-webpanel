@@ -121,6 +121,11 @@ try {
                 <span class="action-text">Site Settings</span>
                 <span class="action-desc">Configure site title, privacy, and email settings</span>
             </a>
+            <a href="?page=admin_backup" class="admin-action-btn">
+                <span class="action-icon">&#128190;</span>
+                <span class="action-text">Backup &amp; Import</span>
+                <span class="action-desc">Export database or import SQL backup</span>
+            </a>
             <a href="?page=submit" class="admin-action-btn">
                 <span class="action-icon">&#128228;</span>
                 <span class="action-text">Submit Report</span>
